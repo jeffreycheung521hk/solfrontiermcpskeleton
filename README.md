@@ -16,6 +16,26 @@ cargo check --workspace
 cargo run --bin solfrontier-mcp   # stdio MCP server
 ```
 
+The state-store path is selected with `--db PATH` or `SOLFRONTIER_DB`; the
+default is `./data/solfrontier.db`.
+
+### Development smoke-test data
+
+Reusable development fixtures live in `bins/solfrontier-mcp/src/dev_seed.rs`.
+The explicit seeding entry point is an ignored integration test, not a Cargo
+binary target, so it is never included in `cargo build --release` artifacts.
+On PowerShell:
+
+```powershell
+$env:SOLFRONTIER_DB = "$PWD\data\mcp-smoke.db"
+cargo test -p solfrontier-mcp --test dev_seed -- --ignored --nocapture
+target\release\solfrontier-mcp.exe --db $env:SOLFRONTIER_DB
+```
+
+The current fixture prints the UUID to pass to `get_intent_status`. Add future
+`get_position` / `get_quote` smoke fixtures to the shared module instead of
+creating one-off seed binaries.
+
 ### Windows OpenSSL build workaround
 
 The Solana 2.1 dependency graph currently enables vendored OpenSSL. On Windows,
