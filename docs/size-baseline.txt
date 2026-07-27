@@ -1,0 +1,209 @@
+SolFrontier MCP size baseline
+Captured: 2026-07-27
+Host: x86_64-pc-windows-msvc
+rustc: 1.94.0 (4a4ef493e 2026-03-02)
+cargo-bloat: 0.12.1
+Binary: target\release\solfrontier-mcp.exe
+Binary size: 965632 bytes (943.0KiB)
+
+=== cargo bloat --release --crates -n 20 (stdout, verbatim) ===
+ File  .text     Size Crate
+21.8%  27.3% 206.0KiB std
+20.4%  25.5% 192.7KiB rmcp
+11.0%  13.7% 103.4KiB serde_core
+ 5.0%   6.3%  47.5KiB tokio
+ 4.0%   5.0%  38.0KiB solfrontier_mcp
+ 3.0%   3.8%  28.6KiB serde_json
+ 2.1%   2.6%  19.5KiB serde
+ 1.9%   2.3%  17.6KiB tracing_subscriber
+ 1.5%   1.8%  13.7KiB chrono
+ 1.2%   1.4%  10.9KiB hashbrown
+ 0.8%   1.0%   7.7KiB tracing
+ 0.5%   0.7%   5.0KiB schemars
+ 0.5%   0.7%   5.0KiB tracing_core
+ 0.5%   0.6%   4.6KiB tokio_util
+ 0.4%   0.5%   3.9KiB anyhow
+ 0.3%   0.4%   2.8KiB mio
+ 0.3%   0.4%   2.7KiB [Unknown]
+ 0.3%   0.3%   2.5KiB parking_lot_core
+ 0.3%   0.3%   2.4KiB memchr
+ 0.2%   0.3%   2.1KiB nu_ansi_term
+ 1.5%   1.8%  13.8KiB And 18 more crates. Use -n N to show more.
+80.2% 100.0% 756.0KiB .text section size, the file size is 943.0KiB
+
+Note: numbers above are a result of guesswork. They are not 100% correct and never will be.
+=== end cargo bloat stdout ===
+
+=== cargo tree -i openssl-sys (stdout, verbatim) ===
+openssl-sys v0.9.117
+└── openssl v0.10.81
+    └── solana-secp256r1-program v2.1.21
+        └── solana-sdk v2.1.21
+            ├── claw-solana-core v0.1.0 (C:\Users\jeffr\solfrontiermcpskeleton\crates\solana-core)
+            │   ├── claw-wallet-engine v0.1.0 (C:\Users\jeffr\solfrontiermcpskeleton\crates\wallet-engine)
+            │   │   └── solfrontier-mcp v0.1.0 (C:\Users\jeffr\solfrontiermcpskeleton\bins\solfrontier-mcp)
+            │   └── solfrontier-mcp v0.1.0 (C:\Users\jeffr\solfrontiermcpskeleton\bins\solfrontier-mcp)
+            ├── claw-wallet-engine v0.1.0 (C:\Users\jeffr\solfrontiermcpskeleton\crates\wallet-engine) (*)
+            ├── solana-account-decoder v2.1.21
+            │   ├── claw-solana-core v0.1.0 (C:\Users\jeffr\solfrontiermcpskeleton\crates\solana-core) (*)
+            │   ├── solana-pubsub-client v2.1.21
+            │   │   ├── claw-solana-core v0.1.0 (C:\Users\jeffr\solfrontiermcpskeleton\crates\solana-core) (*)
+            │   │   ├── solana-client v2.1.21
+            │   │   │   ├── claw-solana-core v0.1.0 (C:\Users\jeffr\solfrontiermcpskeleton\crates\solana-core) (*)
+            │   │   │   └── claw-wallet-engine v0.1.0 (C:\Users\jeffr\solfrontiermcpskeleton\crates\wallet-engine) (*)
+            │   │   └── solana-tpu-client v2.1.21
+            │   │       └── solana-client v2.1.21 (*)
+            │   └── solana-transaction-status v2.1.21
+            │       └── claw-solana-core v0.1.0 (C:\Users\jeffr\solfrontiermcpskeleton\crates\solana-core) (*)
+            ├── solana-client v2.1.21 (*)
+            ├── solana-compute-budget v2.1.21
+            │   └── solana-program-runtime v2.1.21
+            │       ├── solana-config-program v2.1.21
+            │       │   └── solana-account-decoder v2.1.21 (*)
+            │       └── solana-vote-program v2.1.21
+            │           ├── solana-perf v2.1.21
+            │           │   ├── solana-streamer v2.1.21
+            │           │   │   ├── solana-client v2.1.21 (*)
+            │           │   │   ├── solana-quic-client v2.1.21
+            │           │   │   │   └── solana-client v2.1.21 (*)
+            │           │   │   └── solana-udp-client v2.1.21
+            │           │   │       └── solana-client v2.1.21 (*)
+            │           │   └── solana-transaction-metrics-tracker v2.1.21
+            │           │       └── solana-streamer v2.1.21 (*)
+            │           └── solana-rpc-client v2.1.21
+            │               ├── solana-client v2.1.21 (*)
+            │               ├── solana-rpc-client-nonce-utils v2.1.21
+            │               │   └── solana-client v2.1.21 (*)
+            │               ├── solana-thin-client v2.1.21
+            │               │   └── solana-client v2.1.21 (*)
+            │               └── solana-tpu-client v2.1.21 (*)
+            ├── solana-config-program v2.1.21 (*)
+            ├── solana-connection-cache v2.1.21
+            │   ├── solana-client v2.1.21 (*)
+            │   ├── solana-quic-client v2.1.21 (*)
+            │   ├── solana-thin-client v2.1.21 (*)
+            │   ├── solana-tpu-client v2.1.21 (*)
+            │   └── solana-udp-client v2.1.21 (*)
+            ├── solana-metrics v2.1.21
+            │   ├── solana-connection-cache v2.1.21 (*)
+            │   ├── solana-perf v2.1.21 (*)
+            │   ├── solana-program-runtime v2.1.21 (*)
+            │   ├── solana-quic-client v2.1.21 (*)
+            │   ├── solana-streamer v2.1.21 (*)
+            │   └── solana-vote-program v2.1.21 (*)
+            ├── solana-net-utils v2.1.21
+            │   ├── solana-quic-client v2.1.21 (*)
+            │   └── solana-udp-client v2.1.21 (*)
+            ├── solana-perf v2.1.21 (*)
+            ├── solana-program-runtime v2.1.21 (*)
+            ├── solana-pubsub-client v2.1.21 (*)
+            ├── solana-quic-client v2.1.21 (*)
+            ├── solana-rpc-client v2.1.21 (*)
+            ├── solana-rpc-client-api v2.1.21
+            │   ├── solana-client v2.1.21 (*)
+            │   ├── solana-pubsub-client v2.1.21 (*)
+            │   ├── solana-quic-client v2.1.21 (*)
+            │   ├── solana-rpc-client v2.1.21 (*)
+            │   ├── solana-thin-client v2.1.21 (*)
+            │   └── solana-tpu-client v2.1.21 (*)
+            ├── solana-rpc-client-nonce-utils v2.1.21 (*)
+            ├── solana-streamer v2.1.21 (*)
+            ├── solana-thin-client v2.1.21 (*)
+            ├── solana-timings v2.1.21
+            │   └── solana-program-runtime v2.1.21 (*)
+            ├── solana-tpu-client v2.1.21 (*)
+            ├── solana-transaction-metrics-tracker v2.1.21 (*)
+            ├── solana-transaction-status v2.1.21 (*)
+            ├── solana-transaction-status-client-types v2.1.21
+            │   ├── solana-rpc-client v2.1.21 (*)
+            │   ├── solana-rpc-client-api v2.1.21 (*)
+            │   └── solana-transaction-status v2.1.21 (*)
+            ├── solana-udp-client v2.1.21 (*)
+            ├── solana-vote v2.1.21
+            │   └── solana-program-runtime v2.1.21 (*)
+            ├── solana-vote-program v2.1.21 (*)
+            ├── solana-zk-sdk v2.1.21
+            │   ├── spl-elgamal-registry v0.1.1
+            │   │   ├── spl-token-2022 v6.0.0
+            │   │   │   └── spl-associated-token-account v6.0.0
+            │   │   │       └── claw-solana-core v0.1.0 (C:\Users\jeffr\solfrontiermcpskeleton\crates\solana-core) (*)
+            │   │   └── spl-token-2022 v7.0.0
+            │   │       └── claw-solana-core v0.1.0 (C:\Users\jeffr\solfrontiermcpskeleton\crates\solana-core) (*)
+            │   ├── spl-pod v0.5.0
+            │   │   ├── spl-elgamal-registry v0.1.1 (*)
+            │   │   ├── spl-tlv-account-resolution v0.9.0
+            │   │   │   └── spl-transfer-hook-interface v0.9.0
+            │   │   │       ├── spl-token-2022 v6.0.0 (*)
+            │   │   │       └── spl-token-2022 v7.0.0 (*)
+            │   │   ├── spl-token-2022 v6.0.0 (*)
+            │   │   ├── spl-token-2022 v7.0.0 (*)
+            │   │   ├── spl-token-confidential-transfer-proof-extraction v0.2.1
+            │   │   │   ├── spl-elgamal-registry v0.1.1 (*)
+            │   │   │   ├── spl-token-2022 v6.0.0 (*)
+            │   │   │   └── spl-token-2022 v7.0.0 (*)
+            │   │   ├── spl-token-group-interface v0.5.0
+            │   │   │   ├── spl-token-2022 v6.0.0 (*)
+            │   │   │   └── spl-token-2022 v7.0.0 (*)
+            │   │   ├── spl-token-metadata-interface v0.6.0
+            │   │   │   ├── spl-token-2022 v6.0.0 (*)
+            │   │   │   └── spl-token-2022 v7.0.0 (*)
+            │   │   ├── spl-transfer-hook-interface v0.9.0 (*)
+            │   │   └── spl-type-length-value v0.7.0
+            │   │       ├── spl-tlv-account-resolution v0.9.0 (*)
+            │   │       ├── spl-token-2022 v6.0.0 (*)
+            │   │       ├── spl-token-2022 v7.0.0 (*)
+            │   │       ├── spl-token-metadata-interface v0.6.0 (*)
+            │   │       └── spl-transfer-hook-interface v0.9.0 (*)
+            │   ├── spl-token-2022 v6.0.0 (*)
+            │   ├── spl-token-2022 v7.0.0 (*)
+            │   ├── spl-token-confidential-transfer-ciphertext-arithmetic v0.2.1
+            │   │   ├── spl-token-2022 v6.0.0 (*)
+            │   │   └── spl-token-2022 v7.0.0 (*)
+            │   ├── spl-token-confidential-transfer-proof-extraction v0.2.1 (*)
+            │   ├── spl-token-confidential-transfer-proof-generation v0.2.0
+            │   │   └── spl-token-2022 v6.0.0 (*)
+            │   └── spl-token-confidential-transfer-proof-generation v0.3.0
+            │       └── spl-token-2022 v7.0.0 (*)
+            └── solana-zk-token-sdk v2.1.21
+                ├── spl-pod v0.3.1
+                │   ├── spl-tlv-account-resolution v0.7.0
+                │   │   └── spl-transfer-hook-interface v0.7.0
+                │   │       └── spl-token-2022 v4.0.0
+                │   │           ├── solana-account-decoder v2.1.21 (*)
+                │   │           ├── solana-transaction-status v2.1.21 (*)
+                │   │           └── spl-associated-token-account v4.0.0
+                │   │               └── solana-transaction-status v2.1.21 (*)
+                │   ├── spl-token-2022 v4.0.0 (*)
+                │   ├── spl-token-group-interface v0.3.0
+                │   │   ├── solana-account-decoder v2.1.21 (*)
+                │   │   ├── solana-transaction-status v2.1.21 (*)
+                │   │   └── spl-token-2022 v4.0.0 (*)
+                │   ├── spl-token-metadata-interface v0.4.0
+                │   │   ├── solana-account-decoder v2.1.21 (*)
+                │   │   ├── solana-transaction-status v2.1.21 (*)
+                │   │   └── spl-token-2022 v4.0.0 (*)
+                │   ├── spl-transfer-hook-interface v0.7.0 (*)
+                │   └── spl-type-length-value v0.5.0
+                │       ├── spl-tlv-account-resolution v0.7.0 (*)
+                │       ├── spl-token-2022 v4.0.0 (*)
+                │       ├── spl-token-metadata-interface v0.4.0 (*)
+                │       └── spl-transfer-hook-interface v0.7.0 (*)
+                └── spl-token-2022 v4.0.0 (*)
+=== end cargo tree stdout ===
+
+=== OpenSSL finding ===
+The direct package chain is:
+openssl-sys -> openssl -> solana-secp256r1-program -> solana-sdk.
+
+The feature-level reverse tree additionally shows solana-client enabling
+solana-sdk/openssl-vendored, which enables the vendored feature on
+solana-secp256r1-program and openssl. solana-pubsub-client is present in the
+larger Solana client graph, but it is not the sole source: claw-solana-core and
+claw-wallet-engine also reach solana-sdk/solana-client directly. Removing only
+the root workspace's direct solana-pubsub-client entry would therefore not
+guarantee that OpenSSL disappears.
+
+Phase 1 follow-up priority: audit and narrow the solana-client/solana-sdk feature
+graph together with the existing solana-pubsub-client TODO. No dependency or
+core-crate boundary was changed for this baseline. The current Windows build
+workaround is documented in README.md.
