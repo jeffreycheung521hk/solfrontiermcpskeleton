@@ -11,6 +11,8 @@
 //! API shape follows the official rmcp 1.7 counter/calculator examples
 //! (Parameters wrapper + CallToolResult).
 
+#[cfg(test)]
+mod dev_seed;
 mod status;
 
 use clap::Parser;
