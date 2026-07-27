@@ -270,3 +270,162 @@ fn action_mints(rule: &StoredWatchRule) -> (Option<String>, Option<String>) {
         ActionSpec::SolendWithdrawAllDelegated { .. } => (None, None),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use claw_state_store::{Database, DatabaseConfig, NewW5hFundingIntent, W5hIntentStatus};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    static TEST_DB_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    const INTENT_ID: &str = "00112233445566778899aabbccddeeff";
+    const INTENT_UUID: &str = "00112233-4455-6677-8899-aabbccddeeff";
+    const CANONICAL_HASH: &str = "abababababababababababababababababababababababababababababababab";
+
+    struct TempDatabaseFile {
+        path: PathBuf,
+    }
+
+    impl TempDatabaseFile {
+        fn unique() -> Self {
+            let sequence = TEST_DB_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time must be after the Unix epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "solfrontier-mcp-status-{}-{timestamp}-{sequence}.db",
+                std::process::id()
+            ));
+            Self { path }
+        }
+
+        fn config(&self) -> DatabaseConfig {
+            DatabaseConfig {
+                path: self.path.to_string_lossy().into_owned(),
+                max_connections: 1,
+            }
+        }
+    }
+
+    impl Drop for TempDatabaseFile {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm"] {
+                let candidate = PathBuf::from(format!("{}{suffix}", self.path.display()));
+                let _ = fs::remove_file(candidate);
+            }
+        }
+    }
+
+    async fn test_store() -> (
+        TempDatabaseFile,
+        Database,
+        Stage2W5hFundingIntentRepository,
+        Stage2WatchRuleRepository,
+    ) {
+        let file = TempDatabaseFile::unique();
+        let db = Database::open(&file.config())
+            .await
+            .expect("temporary SQLite database must open");
+        let funding_intents = Stage2W5hFundingIntentRepository::new(db.pool().clone());
+        let watch_rules = Stage2WatchRuleRepository::new(db.pool().clone());
+        (file, db, funding_intents, watch_rules)
+    }
+
+    fn funding_intent_fixture() -> NewW5hFundingIntent {
+        NewW5hFundingIntent {
+            intent_id: INTENT_ID.to_string(),
+            rule_id_hex: INTENT_ID.to_string(),
+            canonical_rule_hash_hex: CANONICAL_HASH.to_string(),
+            user_wallet: "C4QQjzWxnJ5QFAbkzhQJ3wTzyX6nw1vyFvJwbPXJGPNW".to_string(),
+            user_usdc_ata: "TestUserUsdcAta1111111111111111111111111111".to_string(),
+            controlled_wallet: "BPfDMmeMBmCbMC1rWh7hwigMBoKGBrKwXxSeUu9hhs5L".to_string(),
+            controlled_usdc_ata: "7LFdKcSV7JQYi3or5y9phHVPjhGigu5DDjUakAFbBmk3".to_string(),
+            amount_raw: 250_000,
+            threshold_bps: 100,
+            save_display_apy_bps_at_creation: 210,
+            native_onchain_apr_bps_at_creation: 165,
+            created_at_ms: 1_700_000_000_000,
+            expires_at_ms: 1_700_000_180_000,
+        }
+    }
+
+    async fn close_test_store(
+        db: Database,
+        funding_intents: Stage2W5hFundingIntentRepository,
+        watch_rules: Stage2WatchRuleRepository,
+    ) {
+        drop(funding_intents);
+        drop(watch_rules);
+        db.pool().close().await;
+    }
+
+    #[tokio::test]
+    async fn stored_funding_intent_returns_repository_status_fields() {
+        let (_file, db, funding_intents, watch_rules) = test_store().await;
+        funding_intents
+            .insert(&funding_intent_fixture())
+            .await
+            .expect("fixture insert must succeed");
+
+        let response = query_intent_status(&funding_intents, &watch_rules, INTENT_UUID)
+            .await
+            .expect("status lookup must succeed");
+
+        assert_eq!(response.intent_ref, INTENT_UUID);
+        assert_eq!(response.status, W5hIntentStatus::FundingRequired.as_str());
+        assert!(!response.is_terminal);
+        assert_eq!(response.source, Some("w5h_funding_intent"));
+        assert_eq!(response.resolved_intent_id.as_deref(), Some(INTENT_ID));
+        assert_eq!(
+            response.canonical_rule_hash.as_deref(),
+            Some(CANONICAL_HASH)
+        );
+        assert_eq!(response.amount_raw, Some(250_000));
+        assert_eq!(response.created_at_ms, Some(1_700_000_000_000));
+        assert_eq!(response.expires_at_ms, Some(1_700_000_180_000));
+        assert!(response.updated_at_ms.is_some());
+        assert!(response.input_mint.is_none());
+        assert!(response.output_mint.is_none());
+
+        close_test_store(db, funding_intents, watch_rules).await;
+    }
+
+    #[tokio::test]
+    async fn missing_intent_returns_not_found_without_protocol_error() {
+        let (_file, db, funding_intents, watch_rules) = test_store().await;
+
+        let response = query_intent_status(&funding_intents, &watch_rules, INTENT_ID)
+            .await
+            .expect("missing rows are a normal query result");
+
+        assert_eq!(response.intent_ref, INTENT_ID);
+        assert_eq!(response.status, "not_found");
+        assert!(!response.is_terminal);
+        assert_eq!(response.resolved_intent_id.as_deref(), Some(INTENT_ID));
+        assert!(response.source.is_none());
+        assert!(response.amount_raw.is_none());
+
+        close_test_store(db, funding_intents, watch_rules).await;
+    }
+
+    #[test]
+    fn canonical_hash_reports_public_api_limitation() {
+        let reason = resolve_intent_ref(CANONICAL_HASH)
+            .expect_err("canonical hash lookup is not publicly exposed");
+        let response = unsupported_response(CANONICAL_HASH, reason);
+
+        assert_eq!(response.intent_ref, CANONICAL_HASH);
+        assert_eq!(response.status, "unsupported_ref");
+        assert!(!response.is_terminal);
+        assert!(response
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("state-store public API")));
+    }
+}
