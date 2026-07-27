@@ -24,3 +24,7 @@ claw-state-store   = { workspace = true }
 claw-solana-core   = { workspace = true }
 claw-risk-engine   = { workspace = true }
 claw-wallet-engine = { workspace = true }
+
+solana-sdk             = { workspace = true }
+solana-client          = { workspace = true }
+solana-account-decoder = { workspace = true }

@@ -13,6 +13,8 @@
 
 #[cfg(test)]
 mod dev_seed;
+mod position;
+mod solend_raw;
 mod status;
 
 use clap::Parser;
@@ -28,6 +30,7 @@ use rmcp::{
 };
 use std::path::PathBuf;
 
+use crate::position::{configured_reader_from_env, query_position, RpcSolendPositionReader};
 use crate::status::query_intent_status;
 
 // ── Tool parameter types (schemars 1.x → JSON Schema, host 端自動看到) ──
@@ -60,14 +63,16 @@ struct GetIntentStatusParams {
 struct SolFrontierServer {
     funding_intents: Stage2W5hFundingIntentRepository,
     watch_rules: Stage2WatchRuleRepository,
+    position_reader: Option<RpcSolendPositionReader>,
 }
 
 #[tool_router]
 impl SolFrontierServer {
-    fn new(db: &Database) -> Self {
+    fn new(db: &Database, position_reader: Option<RpcSolendPositionReader>) -> Self {
         Self {
             funding_intents: Stage2W5hFundingIntentRepository::new(db.pool().clone()),
             watch_rules: Stage2WatchRuleRepository::new(db.pool().clone()),
+            position_reader,
         }
     }
 
@@ -96,8 +101,7 @@ impl SolFrontierServer {
         &self,
         Parameters(p): Parameters<GetPositionParams>,
     ) -> Result<CallToolResult, McpError> {
-        // TODO(Phase1): port from 舊 repo crates/gateway/src/tools/get_solend_position.rs
-        let body = serde_json::json!({ "status": "stub", "wallet": p.wallet });
+        let body = query_position(self.position_reader.as_ref(), &p.wallet).await;
         Ok(CallToolResult::success(vec![Content::text(
             body.to_string(),
         )]))
@@ -160,16 +164,22 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     // stdio transport ⇒ 日誌必須走 stderr,stdout 專屬 JSON-RPC。
     tracing_subscriber::fmt()
+        // Solana's HTTP client has debug events that format a response URL.
+        // Keep a hard INFO ceiling so an API-key-bearing endpoint cannot leak.
+        .with_max_level(tracing::Level::INFO)
         .with_writer(std::io::stderr)
         .init();
 
     tracing::info!("solfrontier-mcp starting (stdio, Phase 1 read-only)");
+    let position_reader = configured_reader_from_env();
     let db = Database::open(&DatabaseConfig {
         path: cli.db.to_string_lossy().into_owned(),
         ..DatabaseConfig::default()
     })
     .await?;
-    let service = SolFrontierServer::new(&db).serve(stdio()).await?;
+    let service = SolFrontierServer::new(&db, position_reader)
+        .serve(stdio())
+        .await?;
     service.waiting().await?;
     Ok(())
 }
