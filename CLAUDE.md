@@ -47,5 +47,15 @@ SolFrontier(前身 ClawSolana / Solfrontier2026)的 MCP 重構版:一個 policy-
 - 體積是一級關注:release profile 已設 `opt-level="z"` / `lto="fat"` / `panic="abort"`。新增依賴前先問「會拖進多大的樹」;定期 `cargo bloat --release --crates`。
 - 依賴收窄的 TODO 標記在根 `Cargo.toml`(tokio features、pubsub-client、token-2022)— 動它們時先 grep 用途。
 - stdio server 的 stdout 專屬 JSON-RPC:**所有日誌走 stderr**(已在 main.rs 設定,勿改)。
+- 格式化只用 `cargo fmt -p solfrontier-mcp`,永不使用 `cargo fmt --all`;每個 commit 前必須跑 `git diff --exit-code -- crates`,確認六個核心 crate 零 diff。
 - 大型搬移遵守舊 DEBT.md 的 PC-1/PC-2/PC-3(路徑審計;一 PR 一主題、不混邏輯改動;由低風險到高風險)。
 - 測試命名用語意名,不要沿用舊 repo 的 prompt-session 前綴(p1_/n6_/w5h_)。
+
+## 技術債
+
+### DEBT-MCP-1:canonical hash 尚無公開反查 API
+
+- **現況:**`Stage2W5hFundingIntentRepository::get` 只接受 32-hex `intent_id`,`Stage2WatchRuleRepository::get` 只接受 16-byte rule UUID。64-hex canonical hash 無公開 lookup;`get_intent_status` 對這類輸入回正常 JSON `status:"unsupported_ref"`,不冒充 `not_found` 或 MCP protocol error。
+- **為何暫不修:**Phase 1 的約束是不動六個核心 crate 及其邊界;在 bin 直接讀 table 或複製 SQL 也會繞過 `claw-state-store` 的公開 repository 邊界。
+- **觸發條件:**Phase 2 的 `finalize_intent` 會把 canonical hash 交給用戶,屆時 status-by-hash 成為必要能力。
+- **屆時二選一:**(1)在 `claw-state-store` 增加公開 hash lookup API,視為正式邊界變更並單獨評審;(2)由 MCP bin 維護自己的 `canonical_hash → intent_id` 索引,保持核心 crate 邊界不變。

@@ -207,3 +207,46 @@ Phase 1 follow-up priority: audit and narrow the solana-client/solana-sdk featur
 graph together with the existing solana-pubsub-client TODO. No dependency or
 core-crate boundary was changed for this baseline. The current Windows build
 workaround is documented in README.md.
+
+=== after state-store wiring (2026-07-27) ===
+Binary: target\release\solfrontier-mcp.exe
+Binary size after cargo-bloat analysis: 2591744 bytes (2531.0KiB)
+Baseline binary size: 953856 bytes (931.5KiB)
+Increase: 1637888 bytes (1599.5KiB, +171.7%, 2.72x baseline)
+
+The size increase is the net result of activating the DB CLI and linking the
+state-store/sqlx/SQLite path that the skeleton dependency graph previously
+stripped as unused. cargo-bloat attributes 50.4KiB to sqlx_sqlite, 43.6KiB to
+sqlx_core, 42.7KiB to libsqlite3_sys, and 15.7KiB to claw_state_store
+(152.4KiB total under those four labels). It also reports 810.6KiB with an
+empty crate label; that native/unattributed row is recorded verbatim below and
+is not assigned to sqlx without stronger symbol attribution. clap_builder is
+now visible at 102.2KiB because --db/SOLFRONTIER_DB is live.
+
+=== cargo bloat --release --crates -n 20 after state-store wiring (stdout; trailing whitespace omitted) ===
+ File  .text     Size Crate
+32.0%  39.1% 810.6KiB
+12.1%  14.8% 306.4KiB std
+ 7.5%   9.1% 189.2KiB rmcp
+ 4.6%   5.6% 116.1KiB serde_core
+ 4.0%   4.9% 102.2KiB clap_builder
+ 3.0%   3.7%  77.2KiB solfrontier_mcp
+ 2.1%   2.5%  52.6KiB tokio
+ 2.0%   2.4%  50.4KiB sqlx_sqlite
+ 1.7%   2.1%  43.6KiB sqlx_core
+ 1.7%   2.1%  42.7KiB libsqlite3_sys
+ 1.4%   1.8%  36.3KiB serde_json
+ 1.4%   1.7%  35.4KiB claw_types
+ 0.9%   1.1%  22.3KiB hashbrown
+ 0.7%   0.9%  18.3KiB tracing_subscriber
+ 0.6%   0.8%  15.7KiB claw_state_store
+ 0.6%   0.7%  14.4KiB serde
+ 0.5%   0.7%  13.7KiB chrono
+ 0.3%   0.4%   7.7KiB tracing
+ 0.3%   0.3%   6.7KiB flume
+ 0.2%   0.3%   5.4KiB sha2
+ 2.9%   3.6%  74.0KiB And 54 more crates. Use -n N to show more.
+81.8% 100.0%   2.0MiB .text section size, the file size is 2.5MiB
+
+Note: numbers above are a result of guesswork. They are not 100% correct and never will be.
+=== end cargo bloat stdout after state-store wiring ===
