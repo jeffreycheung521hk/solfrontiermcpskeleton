@@ -207,3 +207,116 @@ pub fn decode_obligation(data: &[u8]) -> Result<SolendObligationRaw, DecodeError
         closeable,
     })
 }
+
+#[cfg(test)]
+pub(crate) struct ObligationTestFixture {
+    pub data: Vec<u8>,
+    pub owner: Pubkey,
+    pub lending_market: Pubkey,
+    pub deposit_reserve: Pubkey,
+    pub deposited_amount: u64,
+}
+
+/// Fixed one-deposit fixture matching the deployed mainnet account shape seen
+/// by the predecessor's Slice 3G regression test.
+#[cfg(test)]
+pub(crate) fn one_deposit_test_fixture() -> ObligationTestFixture {
+    const MAIN_POOL_LENDING_MARKET: &str = "4UpD2fh7xH3VP9QQaXtsS1YY3bxzWhtfpks7FatyKvdY";
+    const MAIN_POOL_USDC_RESERVE: &str = "BgxfHJDzm44T7XG68MYKx7YisTjZu73tVovyZSjJMpmw";
+    const LAST_UPDATE_SLOT: u64 = 415_083_795;
+    const DEPOSITED_AMOUNT: u64 = 772;
+
+    let owner = Pubkey::new_from_array([0x42; 32]);
+    let lending_market: Pubkey = MAIN_POOL_LENDING_MARKET.parse().expect("fixture market");
+    let deposit_reserve: Pubkey = MAIN_POOL_USDC_RESERVE.parse().expect("fixture reserve");
+    let mut data = vec![0_u8; OBLIGATION_LEN];
+    data[OBL_VERSION_OFF] = 1;
+    data[OBL_LAST_UPDATE_SLOT_OFF..OBL_LAST_UPDATE_SLOT_OFF + 8]
+        .copy_from_slice(&LAST_UPDATE_SLOT.to_le_bytes());
+    data[OBL_LAST_UPDATE_STALE_OFF] = 1;
+    data[OBL_LENDING_MARKET_OFF..OBL_LENDING_MARKET_OFF + 32]
+        .copy_from_slice(&lending_market.to_bytes());
+    data[OBLIGATION_OWNER_OFFSET..OBLIGATION_OWNER_OFFSET + 32].copy_from_slice(&owner.to_bytes());
+    data[OBL_DEPOSITS_LEN_OFF] = 1;
+    data[OBL_BORROWS_LEN_OFF] = 0;
+    data[OBL_DATA_FLAT_OFF..OBL_DATA_FLAT_OFF + 32].copy_from_slice(&deposit_reserve.to_bytes());
+    data[OBL_DATA_FLAT_OFF + OBL_COLL_DEPOSITED_AMOUNT_OFF
+        ..OBL_DATA_FLAT_OFF + OBL_COLL_DEPOSITED_AMOUNT_OFF + 8]
+        .copy_from_slice(&DEPOSITED_AMOUNT.to_le_bytes());
+
+    ObligationTestFixture {
+        data,
+        owner,
+        lending_market,
+        deposit_reserve,
+        deposited_amount: DEPOSITED_AMOUNT,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_mainnet_shape_obligation_decodes() {
+        let fixture = one_deposit_test_fixture();
+        let obligation = decode_obligation(&fixture.data).expect("fixture must decode");
+
+        assert_eq!(fixture.data.len(), OBLIGATION_LEN);
+        assert_eq!(obligation.version, 1);
+        assert_eq!(obligation.last_update_slot, 415_083_795);
+        assert!(obligation.last_update_stale);
+        assert_eq!(obligation.owner, fixture.owner);
+        assert_eq!(obligation.lending_market, fixture.lending_market);
+        assert_eq!(obligation.deposits.len(), 1);
+        assert_eq!(
+            obligation.deposits[0].deposit_reserve,
+            fixture.deposit_reserve
+        );
+        assert_eq!(
+            obligation.deposits[0].deposited_amount,
+            fixture.deposited_amount
+        );
+        assert!(obligation.borrows.is_empty());
+    }
+
+    #[test]
+    fn wrong_size_and_nonzero_true_padding_fail_closed() {
+        assert_eq!(
+            decode_obligation(&vec![0_u8; OBLIGATION_LEN - 1]),
+            Err(DecodeError::WrongSize(OBLIGATION_LEN - 1))
+        );
+
+        let mut fixture = one_deposit_test_fixture();
+        fixture.data[OBL_PADDING_OFF + OBL_PADDING_LEN - 1] = 1;
+        assert_eq!(
+            decode_obligation(&fixture.data),
+            Err(DecodeError::PaddingNonZero)
+        );
+    }
+
+    #[test]
+    fn invalid_bool_and_array_overflow_fail_closed() {
+        let mut fixture = one_deposit_test_fixture();
+        fixture.data[OBL_CLOSEABLE_OFF] = 2;
+        assert_eq!(
+            decode_obligation(&fixture.data),
+            Err(DecodeError::BoolInvalid {
+                offset: OBL_CLOSEABLE_OFF,
+                value: 2,
+                field: "closeable",
+            })
+        );
+
+        let mut fixture = one_deposit_test_fixture();
+        fixture.data[OBL_DEPOSITS_LEN_OFF] = 15;
+        fixture.data[OBL_BORROWS_LEN_OFF] = 5;
+        assert_eq!(
+            decode_obligation(&fixture.data),
+            Err(DecodeError::ArrayOverflow {
+                deposits: 15,
+                borrows: 5,
+            })
+        );
+    }
+}

@@ -246,3 +246,182 @@ fn obligation_json(obligation_pubkey: &Pubkey, obligation: &SolendObligationRaw)
         "deposits": deposits,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::solend_raw::one_deposit_test_fixture;
+
+    type MockReadResult = Result<Vec<(Pubkey, Vec<u8>)>, PositionReadError>;
+
+    struct MockReader {
+        result: Mutex<MockReadResult>,
+        owners: Mutex<Vec<Pubkey>>,
+    }
+
+    impl MockReader {
+        fn returning(result: MockReadResult) -> Self {
+            Self {
+                result: Mutex::new(result),
+                owners: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl SolendPositionReader for MockReader {
+        async fn find_obligations_for_owner(
+            &self,
+            owner_wallet: &Pubkey,
+        ) -> Result<Vec<(Pubkey, Vec<u8>)>, PositionReadError> {
+            self.owners.lock().expect("owners lock").push(*owner_wallet);
+            self.result.lock().expect("result lock").clone()
+        }
+    }
+
+    fn assert_payload_has_no_sensitive_fields(response: &Value) {
+        let serialized = response.to_string();
+        let forbidden = [
+            "Keypair".to_owned(),
+            ["priv", "ate_key"].concat(),
+            ["secret", "_"].concat(),
+            ["tx", "_bytes"].concat(),
+            ["sign", "ed_bytes"].concat(),
+            ["approval", "_request_id"].concat(),
+            ["signing", "_request_id"].concat(),
+        ];
+        for needle in forbidden {
+            assert!(
+                !serialized.contains(&needle),
+                "position payload must not contain `{needle}`"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn config_missing_is_normal_json_without_calling_rpc() {
+        let response = query_position(None::<&MockReader>, "not-even-parsed").await;
+
+        assert_eq!(response["status"], STATUS_CONFIG_MISSING);
+        assert!(response["setup"]
+            .as_str()
+            .expect("setup")
+            .contains("SOLFRONTIER_RPC_URL"));
+    }
+
+    #[tokio::test]
+    async fn no_position_maps_empty_reader_result() {
+        let owner = Pubkey::new_from_array([0x24; 32]);
+        let reader = MockReader::returning(Ok(Vec::new()));
+
+        let response = query_position(Some(&reader), &owner.to_string()).await;
+
+        assert_eq!(response["status"], STATUS_NO_POSITION);
+        assert_eq!(response["obligations"], json!([]));
+        assert_eq!(
+            reader.owners.lock().expect("owners lock").as_slice(),
+            &[owner]
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_error_uses_fixed_safe_reason() {
+        let owner = Pubkey::new_from_array([0x25; 32]);
+        let reader = MockReader::returning(Err(PositionReadError::RequestFailed));
+
+        let response = query_position(Some(&reader), &owner.to_string()).await;
+        let serialized = response.to_string();
+
+        assert_eq!(response["status"], STATUS_RPC_ERROR);
+        assert_eq!(response["reason"], "Solana RPC request failed");
+        assert!(!serialized.contains("http://"));
+        assert!(!serialized.contains("https://"));
+        assert!(!serialized.contains("api-key"));
+    }
+
+    #[tokio::test]
+    async fn fixed_obligation_maps_to_ok_with_exact_raw_deposit() {
+        let fixture = one_deposit_test_fixture();
+        let obligation_pubkey = Pubkey::new_from_array([0x26; 32]);
+        let reader = MockReader::returning(Ok(vec![(obligation_pubkey, fixture.data.clone())]));
+
+        let response = query_position(Some(&reader), &fixture.owner.to_string()).await;
+
+        assert_eq!(response["status"], STATUS_OK);
+        assert_eq!(response["obligation_count"], 1);
+        let obligation = &response["obligations"][0];
+        assert_eq!(
+            obligation["obligation_pubkey"],
+            obligation_pubkey.to_string()
+        );
+        assert_eq!(
+            obligation["lending_market"],
+            fixture.lending_market.to_string()
+        );
+        let deposit = &obligation["deposits"][0];
+        assert_eq!(deposit["reserve"], fixture.deposit_reserve.to_string());
+        assert_eq!(
+            deposit["deposited_amount"],
+            fixture.deposited_amount.to_string()
+        );
+        assert_eq!(deposit["supplied_usdc_estimate_raw"], Value::Null);
+        assert_eq!(deposit["supplied_usdc_estimate_ui"], Value::Null);
+        assert!(deposit["estimate_unavailable_reason"]
+            .as_str()
+            .expect("estimate reason")
+            .contains("no estimate is invented"));
+        assert_payload_has_no_sensitive_fields(&response);
+    }
+
+    #[tokio::test]
+    async fn malformed_obligation_maps_to_decode_error() {
+        let owner = Pubkey::new_from_array([0x27; 32]);
+        let reader = MockReader::returning(Ok(vec![(
+            Pubkey::new_from_array([0x28; 32]),
+            vec![0_u8; 100],
+        )]));
+
+        let response = query_position(Some(&reader), &owner.to_string()).await;
+
+        assert_eq!(response["status"], STATUS_DECODE_ERROR);
+        assert!(response["decode_errors"][0]
+            .as_str()
+            .expect("decode error")
+            .contains("expected 1300"));
+    }
+
+    #[test]
+    fn module_has_no_write_or_signing_path() {
+        const SOURCE: &str = include_str!("position.rs");
+        let forbidden = [
+            ["write_", "client("].concat(),
+            [".send_", "transaction("].concat(),
+            [".send_", "transaction_with_config("].concat(),
+            [".send_raw_", "transaction("].concat(),
+            [".send_raw_", "transaction_with_config("].concat(),
+            [".send_and_confirm_", "transaction("].concat(),
+            [".send_and_confirm_", "transaction_with_spinner("].concat(),
+            [".confirm_", "transaction("].concat(),
+            ["Transaction::", "new_signed_with_payer("].concat(),
+            ["Versioned", "Transaction"].concat(),
+            ["Message", "V0"].concat(),
+            ["AddressLookup", "Table"].concat(),
+            [".simulate_", "transaction("].concat(),
+            ["Keypair", "::new("].concat(),
+            ["create_signing_", "handoff("].concat(),
+            ["ApprovalRequest", "::new("].concat(),
+            ["submit_signed_solend_", "transaction("].concat(),
+            ["sign", "ed_bytes"].concat(),
+            ["private", "_key"].concat(),
+            ["tx", "_bytes"].concat(),
+        ];
+
+        for needle in forbidden {
+            assert!(
+                !SOURCE.contains(&needle),
+                "position module must not contain `{needle}`"
+            );
+        }
+    }
+}
