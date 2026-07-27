@@ -11,6 +11,12 @@
 //! API shape follows the official rmcp 1.7 counter/calculator examples
 //! (Parameters wrapper + CallToolResult).
 
+mod status;
+
+use clap::Parser;
+use claw_state_store::{
+    Database, DatabaseConfig, Stage2W5hFundingIntentRepository, Stage2WatchRuleRepository,
+};
 use rmcp::{
     handler::server::wrapper::Parameters,
     model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
@@ -18,6 +24,9 @@ use rmcp::{
     transport::stdio,
     ErrorData as McpError, ServerHandler, ServiceExt,
 };
+use std::path::PathBuf;
+
+use crate::status::query_intent_status;
 
 // ── Tool parameter types (schemars 1.x → JSON Schema, host 端自動看到) ──
 
@@ -39,19 +48,25 @@ struct GetPositionParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct GetIntentStatusParams {
-    /// Canonical intent hash (SHA-256 hex) or intent UUID
+    /// Intent UUID. A canonical SHA-256 hash currently returns `unsupported_ref`.
     intent_ref: String,
 }
 
 // ── Server ─────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-struct SolFrontierServer;
+struct SolFrontierServer {
+    funding_intents: Stage2W5hFundingIntentRepository,
+    watch_rules: Stage2WatchRuleRepository,
+}
 
 #[tool_router]
 impl SolFrontierServer {
-    fn new() -> Self {
-        Self
+    fn new(db: &Database) -> Self {
+        Self {
+            funding_intents: Stage2W5hFundingIntentRepository::new(db.pool().clone()),
+            watch_rules: Stage2WatchRuleRepository::new(db.pool().clone()),
+        }
     }
 
     /// READ-ONLY. Jupiter quote preview — no transaction is built or signed.
@@ -68,7 +83,9 @@ impl SolFrontierServer {
             "output_mint": p.output_mint,
             "amount": p.amount,
         });
-        Ok(CallToolResult::success(vec![Content::text(body.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            body.to_string(),
+        )]))
     }
 
     /// READ-ONLY. Solend position for a wallet.
@@ -79,21 +96,44 @@ impl SolFrontierServer {
     ) -> Result<CallToolResult, McpError> {
         // TODO(Phase1): port from 舊 repo crates/gateway/src/tools/get_solend_position.rs
         let body = serde_json::json!({ "status": "stub", "wallet": p.wallet });
-        Ok(CallToolResult::success(vec![Content::text(body.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            body.to_string(),
+        )]))
     }
 
     /// READ-ONLY. Bounded-intent lifecycle state from the state store.
     #[tool(
-        description = "Get lifecycle status of a bounded intent by canonical hash or UUID (read-only)"
+        description = "Get bounded-intent lifecycle status by UUID (read-only); canonical hash lookup currently returns unsupported_ref"
     )]
     async fn get_intent_status(
         &self,
         Parameters(p): Parameters<GetIntentStatusParams>,
     ) -> Result<CallToolResult, McpError> {
-        // TODO(Phase1): query claw-state-store durable_pending / lifecycle tables.
-        let body = serde_json::json!({ "status": "stub", "intent_ref": p.intent_ref });
-        Ok(CallToolResult::success(vec![Content::text(body.to_string())]))
+        let response = query_intent_status(&self.funding_intents, &self.watch_rules, &p.intent_ref)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "get_intent_status state-store query failed");
+                McpError::internal_error("state-store query failed", None)
+            })?;
+        let body = serde_json::to_string(&response).map_err(|error| {
+            tracing::error!(error = %error, "get_intent_status response serialization failed");
+            McpError::internal_error("intent status serialization failed", None)
+        })?;
+        Ok(CallToolResult::success(vec![Content::text(body)]))
     }
+}
+
+#[derive(Debug, Parser)]
+#[command(name = "solfrontier-mcp")]
+struct Cli {
+    /// SQLite state-store path.
+    #[arg(
+        long,
+        env = "SOLFRONTIER_DB",
+        default_value = "./data/solfrontier.db",
+        value_name = "PATH"
+    )]
+    db: PathBuf,
 }
 
 const INSTRUCTIONS: &str = "SolFrontier is a fail-closed, policy-gated control plane for bounded \
@@ -115,11 +155,19 @@ impl ServerHandler for SolFrontierServer {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
     // stdio transport ⇒ 日誌必須走 stderr,stdout 專屬 JSON-RPC。
-    tracing_subscriber::fmt().with_writer(std::io::stderr).init();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
 
     tracing::info!("solfrontier-mcp starting (stdio, Phase 1 read-only)");
-    let service = SolFrontierServer::new().serve(stdio()).await?;
+    let db = Database::open(&DatabaseConfig {
+        path: cli.db.to_string_lossy().into_owned(),
+        ..DatabaseConfig::default()
+    })
+    .await?;
+    let service = SolFrontierServer::new(&db).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }
