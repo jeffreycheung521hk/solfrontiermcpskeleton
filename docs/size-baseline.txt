@@ -250,3 +250,48 @@ now visible at 102.2KiB because --db/SOLFRONTIER_DB is live.
 
 Note: numbers above are a result of guesswork. They are not 100% correct and never will be.
 === end cargo bloat stdout after state-store wiring ===
+
+=== after rpc wiring (2026-07-27) ===
+Binary: target\release\solfrontier-mcp.exe
+Normal cargo build --release size: 5039104 bytes (4921.0KiB)
+Binary size after cargo-bloat analysis: 5039616 bytes (4921.5KiB)
+Previous state-store analysis size: 2591744 bytes (2531.0KiB)
+Increase from state-store wiring: 2447872 bytes (2390.5KiB, +94.4%, 1.94x)
+Initial skeleton baseline size: 953856 bytes (931.5KiB)
+Increase from initial baseline: 4085760 bytes (3990.0KiB, +428.3%, 5.28x)
+
+This is the first build where the Solana nonblocking RPC call is reachable, so
+the HTTP/2 and TLS stack is retained by the linker. cargo-bloat attributes
+228.5KiB to h2, 147.6KiB to hyper, 147.0KiB to rustls, 66.9KiB to ring, and
+39.5KiB to reqwest (629.5KiB total under those five labels). It also reports
+933.0KiB with an empty crate label; that native/unattributed row is recorded
+verbatim below and is not assigned to the network stack without stronger
+symbol attribution.
+
+=== cargo bloat --release --crates -n 20 after rpc wiring (stdout; trailing whitespace omitted) ===
+ File  .text     Size Crate
+19.0%  26.5% 933.0KiB
+ 8.7%  12.1% 426.7KiB std
+ 4.6%   6.5% 228.5KiB h2
+ 3.7%   5.1% 180.3KiB rmcp
+ 3.0%   4.2% 147.6KiB hyper
+ 3.0%   4.2% 147.0KiB rustls
+ 2.8%   3.9% 136.5KiB serde_core
+ 2.1%   2.9% 102.7KiB solfrontier_mcp
+ 2.1%   2.9% 102.2KiB clap_builder
+ 1.5%   2.1%  74.2KiB tokio
+ 1.4%   1.9%  66.9KiB ring
+ 1.3%   1.8%  64.1KiB futures_util
+ 1.1%   1.5%  53.9KiB zstd_sys
+ 1.0%   1.5%  51.4KiB serde_json
+ 1.0%   1.4%  50.3KiB sqlx_sqlite
+ 0.9%   1.2%  43.6KiB sqlx_core
+ 0.9%   1.2%  42.7KiB libsqlite3_sys
+ 0.8%   1.1%  39.5KiB reqwest
+ 0.7%   1.0%  35.0KiB claw_types
+ 0.7%   1.0%  34.4KiB hashbrown
+ 8.1%  11.4% 399.4KiB And 114 more crates. Use -n N to show more.
+71.4% 100.0%   3.4MiB .text section size, the file size is 4.8MiB
+
+Note: numbers above are a result of guesswork. They are not 100% correct and never will be.
+=== end cargo bloat stdout after rpc wiring ===
