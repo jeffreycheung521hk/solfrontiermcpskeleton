@@ -1,0 +1,98 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/types",
+    "crates/observability",
+    "crates/state-store",
+    "crates/solana-core",
+    "crates/wallet-engine",
+    "crates/risk-engine",
+    "bins/solfrontier-mcp",
+]
+
+[workspace.package]
+version    = "0.1.0"
+edition    = "2021"
+authors    = ["SolFrontier Contributors"]
+license    = "MIT"
+repository = "https://github.com/jeffreycheung521hk/solfrontier-mcp"
+
+[workspace.dependencies]
+# ── MCP server (official Rust SDK) ──────────────────────────────
+# 2026-07 crates.io 最新為 1.7.0(以 crates.io 為準,docs.rs 摘要曾誤報 2.2)。
+# rmcp 1.x 依賴 schemars ^1.0 — 與本 workspace 的 schemars 0.8(claw-types 用)
+# 是兩個 major,可並存;bin 端 param structs 用 schemars 1(見 bins/*/Cargo.toml)。
+rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
+
+# async runtime
+# TODO(size): 收窄 features — 原 repo 用 "full"。先列常用集,cargo check 缺什麼再加。
+tokio        = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "io-std", "io-util", "fs"] }
+tokio-stream = { version = "0.1" }
+
+# serialization
+serde        = { version = "1", features = ["derive"] }
+serde_json   = { version = "1" }
+schemars     = { version = "0.8", features = ["uuid1"] }
+toml         = { version = "0.8" }
+
+# error handling
+anyhow       = { version = "1" }
+thiserror    = { version = "1" }
+
+# logging / tracing
+tracing            = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# database
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "migrate", "uuid", "chrono", "macros"], default-features = false }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# identity / time
+uuid   = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# crypto / keys
+ed25519-dalek = { version = "2" }
+rand          = { version = "0.8" }
+
+# Solana (沿用原 repo 的 pin;升級另開 PR)
+solana-sdk                   = { version = "=2.1.21" }
+solana-client                = { version = "=2.1.21" }
+solana-transaction-status    = { version = "=2.1.21" }
+solana-account-decoder       = { version = "=2.1.21" }
+solana-pubsub-client         = { version = "=2.1.21" }   # TODO(size): 確認是否真的用到
+spl-token                    = { version = "7", features = ["no-entrypoint"] }
+spl-token-2022               = { version = "7", features = ["no-entrypoint"] }   # TODO(size): 確認是否真的用到
+spl-associated-token-account = { version = "6", features = ["no-entrypoint"] }
+
+# encoding / misc
+base64      = { version = "0.21" }
+hex         = { version = "0.4" }
+bs58        = { version = "0.5" }
+bincode     = { version = "1" }
+futures     = { version = "0.3" }
+async-trait = { version = "0.1" }
+dashmap     = { version = "5" }
+parking_lot = { version = "0.12" }
+
+# workspace crates(只保留六個核心 crate;gateway/agent-runtime/api/channels 已按建議書刪除)
+claw-types         = { path = "crates/types" }
+claw-observability = { path = "crates/observability" }
+claw-state-store   = { path = "crates/state-store" }
+claw-solana-core   = { path = "crates/solana-core" }
+claw-wallet-engine = { path = "crates/wallet-engine" }
+claw-risk-engine   = { path = "crates/risk-engine" }
+
+# ── 體積優先 release profile(建議書 §3.2)──────────────────────
+[profile.release]
+opt-level     = "z"
+lto           = "fat"
+codegen-units = 1
+strip         = true
+panic         = "abort"
+
+[profile.dev]
+opt-level = 0
+debug     = true

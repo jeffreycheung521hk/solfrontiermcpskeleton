@@ -1,0 +1,26 @@
+[package]
+name    = "solfrontier-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rmcp        = { workspace = true }
+tokio       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+# 不用 workspace 的 schemars 0.8 — rmcp 1.x 的 Parameters<T> 要求 schemars 1.x 的
+# JsonSchema。兩個 major 在依賴圖中並存無礙(claw-types 繼續用 0.8)。
+schemars    = { version = "1" }
+anyhow      = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap        = { workspace = true }
+
+claw-types         = { workspace = true }
+claw-observability = { workspace = true }
+claw-state-store   = { workspace = true }
+claw-solana-core   = { workspace = true }
+claw-risk-engine   = { workspace = true }
+claw-wallet-engine = { workspace = true }
