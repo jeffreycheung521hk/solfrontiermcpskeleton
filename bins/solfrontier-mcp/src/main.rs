@@ -112,11 +112,8 @@ in the user's own wallet (Phantom) via a separate signing page, never through th
 #[tool_handler]
 impl ServerHandler for SolFrontierServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            instructions: Some(INSTRUCTIONS.to_string()),
-            ..Default::default()
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions(INSTRUCTIONS)
     }
 }
 
