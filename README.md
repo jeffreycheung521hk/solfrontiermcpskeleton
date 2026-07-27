@@ -12,7 +12,7 @@ control plane, exposed as an MCP stdio server.
 ## Quick start (Phase 1)
 
 ```bash
-cargo check          # fix any rmcp 1.7 API drift first — skeleton was authored unbuilt
+cargo check --workspace
 cargo run --bin solfrontier-mcp   # stdio MCP server
 ```
 

@@ -22,7 +22,7 @@ repository = "https://github.com/jeffreycheung521hk/solfrontier-mcp"
 # 2026-07 crates.io 最新為 1.7.0(以 crates.io 為準,docs.rs 摘要曾誤報 2.2)。
 # rmcp 1.x 依賴 schemars ^1.0 — 與本 workspace 的 schemars 0.8(claw-types 用)
 # 是兩個 major,可並存;bin 端 param structs 用 schemars 1(見 bins/*/Cargo.toml)。
-rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "=1.7.0", features = ["server", "macros", "transport-io"] }
 
 # async runtime
 # TODO(size): 收窄 features — 原 repo 用 "full"。先列常用集,cargo check 缺什麼再加。

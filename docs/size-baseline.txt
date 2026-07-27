@@ -4,23 +4,23 @@ Host: x86_64-pc-windows-msvc
 rustc: 1.94.0 (4a4ef493e 2026-03-02)
 cargo-bloat: 0.12.1
 Binary: target\release\solfrontier-mcp.exe
-Binary size: 965632 bytes (943.0KiB)
+Binary size: 953856 bytes (931.5KiB)
 
 === cargo bloat --release --crates -n 20 (stdout, verbatim) ===
  File  .text     Size Crate
-21.8%  27.3% 206.0KiB std
-20.4%  25.5% 192.7KiB rmcp
-11.0%  13.7% 103.4KiB serde_core
- 5.0%   6.3%  47.5KiB tokio
- 4.0%   5.0%  38.0KiB solfrontier_mcp
- 3.0%   3.8%  28.6KiB serde_json
+21.8%  27.2% 203.5KiB std
+20.3%  25.3% 189.0KiB rmcp
+11.1%  13.9% 103.8KiB serde_core
+ 5.1%   6.3%  47.2KiB tokio
+ 3.9%   4.8%  35.9KiB solfrontier_mcp
+ 3.1%   3.8%  28.6KiB serde_json
  2.1%   2.6%  19.5KiB serde
- 1.9%   2.3%  17.6KiB tracing_subscriber
+ 1.9%   2.4%  17.6KiB tracing_subscriber
  1.5%   1.8%  13.7KiB chrono
- 1.2%   1.4%  10.9KiB hashbrown
+ 1.1%   1.4%  10.2KiB hashbrown
  0.8%   1.0%   7.7KiB tracing
  0.5%   0.7%   5.0KiB schemars
- 0.5%   0.7%   5.0KiB tracing_core
+ 0.5%   0.7%   4.9KiB tracing_core
  0.5%   0.6%   4.6KiB tokio_util
  0.4%   0.5%   3.9KiB anyhow
  0.3%   0.4%   2.8KiB mio
@@ -28,8 +28,8 @@ Binary size: 965632 bytes (943.0KiB)
  0.3%   0.3%   2.5KiB parking_lot_core
  0.3%   0.3%   2.4KiB memchr
  0.2%   0.3%   2.1KiB nu_ansi_term
- 1.5%   1.8%  13.8KiB And 18 more crates. Use -n N to show more.
-80.2% 100.0% 756.0KiB .text section size, the file size is 943.0KiB
+ 1.5%   1.8%  13.6KiB And 18 more crates. Use -n N to show more.
+80.2% 100.0% 747.0KiB .text section size, the file size is 931.5KiB
 
 Note: numbers above are a result of guesswork. They are not 100% correct and never will be.
 === end cargo bloat stdout ===

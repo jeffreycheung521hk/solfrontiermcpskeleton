@@ -8,13 +8,12 @@
 //! In particular: this binary must NEVER hold main-wallet key material,
 //! and no tool may sign or submit a transaction in Phase 1.
 //!
-//! API shape verified against rmcp 1.7 / rust-sdk main-branch counter example
-//! (tool_router field + Parameters wrapper + CallToolResult). Authored in a
-//! no-build sandbox: run `cargo check` first and fix any residual drift.
+//! API shape follows the official rmcp 1.7 counter/calculator examples
+//! (Parameters wrapper + CallToolResult).
 
 use rmcp::{
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
+    handler::server::wrapper::Parameters,
+    model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
     transport::stdio,
     ErrorData as McpError, ServerHandler, ServiceExt,
@@ -47,19 +46,12 @@ struct GetIntentStatusParams {
 // ── Server ─────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-struct SolFrontierServer {
-    tool_router: ToolRouter<Self>,
-    // Phase 1 wiring targets (add as you connect real backends):
-    // rpc: std::sync::Arc<claw_solana_core::ClawRpcClient>,
-    // store: std::sync::Arc<claw_state_store::StateStore>,
-}
+struct SolFrontierServer;
 
 #[tool_router]
 impl SolFrontierServer {
     fn new() -> Self {
-        Self {
-            tool_router: Self::tool_router(),
-        }
+        Self
     }
 
     /// READ-ONLY. Jupiter quote preview — no transaction is built or signed.
@@ -113,6 +105,10 @@ in the user's own wallet (Phantom) via a separate signing page, never through th
 impl ServerHandler for SolFrontierServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(
+                env!("CARGO_PKG_NAME"),
+                env!("CARGO_PKG_VERSION"),
+            ))
             .with_instructions(INSTRUCTIONS)
     }
 }
