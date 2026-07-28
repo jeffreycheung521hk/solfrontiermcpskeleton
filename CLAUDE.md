@@ -27,23 +27,41 @@ SolFrontier(前身 ClawSolana / Solfrontier2026)的 MCP 重構版:一個 policy-
 | 位置 | 狀態 | 說明 |
 |---|---|---|
 | `crates/types` `observability` `state-store` `solana-core` `wallet-engine` `risk-engine` | **原封搬入,不動邊界** | 來自 Solfrontier2026,是 mainnet proof 的信任錨 |
-| `bins/solfrontier-mcp` | 新寫 | rmcp stdio server;唯一的新程式碼落點 |
+| `bins/solfrontier-mcp` | 新寫 | rmcp stdio server;所有 MCP Rust 新碼的落點 |
+| `web/signing-page` | Phase 2 靜態頁 | 單檔 Phantom 入金頁;零後端接觸,由使用者自行以只綁 `127.0.0.1` 且只公開該目錄的靜態伺服器啟動;MCP binary 不開 HTTP port、不自動開瀏覽器 |
 | (未來) `crates/protocols/` | Phase 3 | Jupiter/Solend builders,從舊 gateway 抽取 |
 | (未來) `crates/executor` | Phase 3 | watcher + CAS lease + controlled-wallet executor |
 
 **禁止**重新引入:自製 LLM client / ReAct loop(舊 agent-runtime)、HTTP API surface(舊 api crate)、chat UI。這些由 MCP host 提供。
 
-## 目前階段:Phase 2(草稿提案 → finalize)
+`web/signing-page` 是使用者自行啟動的 loopback-only 靜態檔案,不是 MCP HTTP API;不得把其伺服器、路由或自動開瀏覽器邏輯塞進 MCP binary。
+
+## 目前階段:Phase 2(草稿提案 → finalize → 入金確認)
 
 Phase 1 已完成:`get_quote`、`get_position`、`get_intent_status` 三個唯讀 tools 已分別接上 Jupiter、Solana RPC/Solend 與 state-store 真實後端,並通過 stdio MCP 驗證。
 
-Phase 2 第一切片 `propose_intent` 已完成;第二切片加入明確標示會寫 DB 的 `finalize_intent`:
+Phase 2 第一切片 `propose_intent`、第二切片 `finalize_intent` 已完成;第三切片加入本地簽名頁與明確標示會寫 DB 的 `confirm_funding`:
 
 1. MCP host 直接提供由 schemars schema 驗證的 typed 參數;不移植舊 `stage2_llm_intent_extractor`。
 2. `propose_intent` 只驗證條件、精確解析 USDC 金額、計算向後相容的 canonical draft hash,並產生隨機且非正典的 `draft_id`;此時 `No DB row exists at this point`。`draft_id` 不得進入 draft hash 或 canonical rule hash 的 preimage。
 3. `finalize_intent` 重算並核對 draft hash,在 bin 自有 sidecar consume `draft_id`,讀取可信的 Solana slot/native APR 與 Save APY,再依舊系統的非事務順序建立 WatchRule 與 funding intent。此 tool 會寫資料庫,但仍然零簽名、零交易建構、零廣播。
 4. Controlled wallet/ATA 延續舊系統固定值;外部出資者由 finalize 的 `user_wallet` 明確提供,不得用 controlled wallet 冒充。
-5. 入金簽名頁、`confirm_funding`、watcher/executor 都不在本切片;Phase 2 後續見建議書 §4,每個寫路徑切片必須獨立評審。
+5. 第三切片加入使用者自行以 loopback 靜態伺服的 Phantom 簽名頁與 `confirm_funding`。MCP binary 仍只提供 stdio、絕不持有私鑰或自動簽名;簽名頁只組 Memo → TransferChecked 並交由匹配的 Phantom 錢包明確批准。
+6. `confirm_funding` 以 `confirmed` commitment 讀取交易;歷史欄位名 `funding_finalized_slot` 實際保存 `getTransaction.result.slot`,名稱不得被解讀為 `finalized` 保證。
+7. 全部鏈上證據驗證通過後才依序做 `funding_required → funding_submitted → budget_reserved`。第二個 CAS 失敗留下 `funding_submitted` 時,相同 signature 的重試會重新讀取並完整驗證交易,再冪等重試第二個 CAS,不得轉成 invalid。
+
+### Phase 2 funding 的刻意安全偏離
+
+- **全通過才 flip:**舊實作先把 funding 改成 submitted,再驗證 Memo/金額,失敗時用 `mark_funding_invalid_if_submitted`。新 MCP 實作先完成所有鏈上驗證;拒絕或 pending 均完全不改 lifecycle,只有全部通過後才執行兩個 CAS。這避免未確認或惡意交易污染主 DB 狀態。
+- **驗證真正出資者:**舊驗證器只釘 Memo 與收款 token delta,沒有證明登記的 `user_wallet` 實際出資。新實作另外要求該 wallet 是 signer、其登記 ATA 精確扣款,並核對兩側 ATA owner、mint 與 controlled ATA。沒有任何下游依賴「任何人都可代付」的舊漏洞。
+- **忠實搬遷原則:**忠實搬遷適用於有相容性意義的行為語意,例如非交易式孤兒 row、timestamp 落差與過期後到帳的退款狀態;不適用於安全漏洞。上述兩項是經明確記錄及評審的安全收緊。
+
+### 已接受風險:以 `confirmed` 而非 `finalized` 確認入金
+
+- **風險:**沿用舊系統的 `confirmed` commitment 後,區塊理論上仍可能因叢集分叉而回滾;此時 funding 已標記為 `budget_reserved`,未來 executor 可能動用受控錢包資金執行一筆實際未收到款的意向。
+- **接受理由:**這是舊系統已在 Solana 主網實測驗證過的行為;`confirmed` 回滾需要主網叢集分叉,實務上極罕見。Phase 2 目前仍屬測試規模,因此暫時接受此風險容忍度。
+- **與安全偏離的區別:**「全通過才 flip」與「驗證真正出資者」修補的是攻擊者可主動利用的漏洞;commitment 等級則是風險容忍度參數。一般第三方或 MCP 呼叫者無法單方面觸發 Solana 叢集分叉來製造 `confirmed` 回滾。
+- **重新評估觸發條件:**單筆金額超出測試規模,或系統開始管理任何非測試資金時(兩者取最早),必須重新評估並明確決定是否改為等待 `finalized` 後才 flip 到 `budget_reserved`;評審完成前不得默認沿用測試期容忍度。
 
 ## 工程紀律
 
@@ -85,9 +103,14 @@ Phase 2 第一切片 `propose_intent` 已完成;第二切片加入明確標示�
 - **風險:**簽名頁倒數依回傳 deadline 顯示,而 lifecycle/watcher 以主 DB deadline 為準;兩者在邊界附近可能對「已過期」有短暫不同判斷。
 - **觸發條件:**Phase 3 executor 合併評審前,必須明定 DB timestamps 與 tool 回傳 timestamps 的唯一權威來源及過期邊界,並讓 signing page、watcher/lifecycle 使用同一套判定;未完成不得關閉本債。
 
-### DEBT-P2-FINALIZE-4:故障回應測試缺口
+### DEBT-P2-FINALIZE-4（已關閉）:故障回應測試缺口
 
-- **`sidecar_unavailable` 缺口原因:**這不是技術阻塞;可在衍生 sidecar 路徑預置損毀 SQLite,穩定令 claim 回 `Unavailable`。本次依「記錄、不修」範圍只保留既有 lookup corruption 測試,尚未增加 finalize-level 回應契約測試。
-- **`sidecar_unavailable` 補測觸發條件:**首次修改 `IntentSidecar`/claim-to-response 映射,或最遲在 Phase 2 funding(②-3)分支合併前(兩者取最早),必須補測 `status:"sidecar_unavailable"`、主 DB 零寫入且無 `funding`/`signing`。
-- **`market_data_error` 缺口原因:**這也不是技術阻塞;現有 `MockMarketSource` 已可離線回傳 `FinalizeMarketReadError`,只是本次依「記錄、不修」範圍未增加 finalize-level 回應契約測試。
-- **`market_data_error` 補測觸發條件:**首次修改 consume-before-market 順序、`FinalizeMarketDataSource` 或錯誤分類/回應欄位,或最遲在 Phase 2 funding(②-3)分支合併前(條件取最早),必須補測 error class、`draft_consumed:true`、同 draft 不可重用、主 DB 零寫入且無 `funding`/`signing`。
+- **關閉方式:**Phase 2 funding(②-3)開工時已補上兩條 finalize-level 離線契約測試。損毀 SQLite fixture 釘死 `sidecar_unavailable`、主 DB 零寫入且無 `funding`/`signing`;`MockMarketSource` 故障 fixture 釘死固定 error class、`draft_consumed:true`、同 draft 不可重用、主 DB 零寫入且無 `funding`/`signing`。
+- **回歸門檻:**後續修改 `IntentSidecar`/claim-to-response 映射、consume-before-market 順序、`FinalizeMarketDataSource` 或錯誤分類/回應欄位時,上述測試必須繼續通過;不可移除或弱化 fail-closed 斷言。
+
+### DEBT-P2-FUNDING-1:過期入金無自動退款 handler
+
+- **現況:**funding row 的硬期限為 `expires_at_ms`(目前窗口 180,000ms);WatchRule 另有 `created_at_slot + 480` 的 lease 期限。沿用舊語意,鏈上證據全部正確但在 funding deadline 後才到帳的入金仍會被接受並記錄,但已不能當作正常可執行資金。
+- **目前處理:**`confirm_funding` 以交易 `blockTime`(缺失時才用明確標示的確認時鐘 fallback)對 funding row `expires_at_ms` 判定 late,並回報「此入金於過期後到達,已記錄為可退款;退款目前需人工處理」。回應另行揭露 WatchRule slot deadline;它只決定 executor 能否取得 lease,不取代 funding deadline。
+- **風險:**目前沒有自動退款 handler 或已文件化的完整人工退款程序,資金可能停留在 controlled ATA。回應與 README 不得把 late funding 呈現為一般成功或暗示退款已完成。
+- **觸發條件:**Phase 3 executor 上線前,必須決定並評審退款路徑(自動退款或明確、可操作且可稽核的人工程序);未完成不得讓 executor 消費此類 late funding,也不得關閉本債。

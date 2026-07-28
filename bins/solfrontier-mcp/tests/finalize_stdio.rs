@@ -10,6 +10,7 @@ use std::{
 };
 
 use serde_json::{json, Map, Value};
+use solana_sdk::signature::Signature;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -201,7 +202,7 @@ fn proposal_arguments() -> Value {
 }
 
 #[test]
-fn stdio_finalize_without_rpc_is_fail_closed_and_server_stays_alive() {
+fn stdio_write_tools_without_rpc_are_fail_closed_and_server_stays_alive() {
     let mut mcp = McpProcess::spawn();
 
     let initialize = mcp.request(
@@ -243,6 +244,7 @@ fn stdio_finalize_without_rpc_is_fail_closed_and_server_stays_alive() {
     assert_eq!(
         by_name.keys().copied().collect::<Vec<_>>(),
         vec![
+            "confirm_funding",
             "finalize_intent",
             "get_intent_status",
             "get_position",
@@ -257,6 +259,14 @@ fn stdio_finalize_without_rpc_is_fail_closed_and_server_stays_alive() {
             .expect("finalize_intent must have a description")
             .starts_with("WRITE DATABASE:"),
         "finalize_intent must be visibly labeled as a database write"
+    );
+    assert!(
+        by_name["confirm_funding"]
+            .get("description")
+            .and_then(Value::as_str)
+            .expect("confirm_funding must have a description")
+            .starts_with("WRITE DATABASE:"),
+        "confirm_funding must be visibly labeled as a database write"
     );
 
     let proposal = proposal_arguments();
@@ -311,13 +321,30 @@ fn stdio_finalize_without_rpc_is_fail_closed_and_server_stays_alive() {
         Some(false)
     );
 
-    let second_list = mcp.request(5, "tools/list", json!({}));
+    let confirm_response = mcp.request(
+        5,
+        "tools/call",
+        json!({
+            "name": "confirm_funding",
+            "arguments": {
+                "intent_id": "00000000000000000000000000000000",
+                "tx_signature": Signature::from([7_u8; 64]).to_string()
+            },
+        }),
+    );
+    let confirmed = tool_text(&confirm_response);
+    assert_eq!(
+        confirmed.get("status").and_then(Value::as_str),
+        Some("not_found")
+    );
+
+    let second_list = mcp.request(6, "tools/list", json!({}));
     assert_eq!(
         response_result(&second_list)
             .get("tools")
             .and_then(Value::as_array)
             .map(Vec::len),
-        Some(5)
+        Some(6)
     );
     mcp.assert_running();
     mcp.shutdown();

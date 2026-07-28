@@ -5,7 +5,9 @@
 //! `propose_intent` calculator and an explicitly write-capable
 //! `finalize_intent` bridge. Finalize verifies the proposal hash, consumes a
 //! random non-canonical draft id, and creates the legacy-compatible WatchRule
-//! plus funding-intent rows. It still performs no signing, transaction
+//! plus funding-intent rows. A separate `confirm_funding` tool verifies an
+//! already user-signed transaction before advancing the two funding CAS
+//! transitions. The binary still performs no signing, transaction
 //! construction, broadcast, or watcher/executor action.
 //!
 //! System invariants INV-1..INV-8 (原 ARCHITECTURE.md) apply verbatim.
@@ -19,6 +21,7 @@
 mod dev_seed;
 mod finalize;
 mod finalize_market;
+mod funding;
 mod position;
 mod propose;
 mod quote;
@@ -42,6 +45,10 @@ use std::path::PathBuf;
 use crate::finalize::{finalize_intent_json, FinalizeIntentParams, SystemFinalizeClock};
 use crate::finalize_market::{
     configured_finalize_market_source_from_env, RpcSaveFinalizeMarketSource,
+};
+use crate::funding::{
+    configured_funding_reader_from_env, confirm_funding_json, ConfirmFundingParams,
+    RpcFundingTransactionReader, SystemFundingClock,
 };
 use crate::position::{configured_reader_from_env, query_position, RpcSolendPositionReader};
 use crate::propose::{propose_intent_json, ProposeIntentParams};
@@ -84,6 +91,7 @@ struct SolFrontierServer {
     position_reader: Option<RpcSolendPositionReader>,
     quote_source: HttpJupiterClient,
     finalize_market_source: Option<RpcSaveFinalizeMarketSource>,
+    funding_reader: Option<RpcFundingTransactionReader>,
     intent_sidecar: IntentSidecar,
 }
 
@@ -94,6 +102,7 @@ impl SolFrontierServer {
         position_reader: Option<RpcSolendPositionReader>,
         quote_source: HttpJupiterClient,
         finalize_market_source: Option<RpcSaveFinalizeMarketSource>,
+        funding_reader: Option<RpcFundingTransactionReader>,
         intent_sidecar: IntentSidecar,
     ) -> Self {
         Self {
@@ -102,6 +111,7 @@ impl SolFrontierServer {
             position_reader,
             quote_source,
             finalize_market_source,
+            funding_reader,
             intent_sidecar,
         }
     }
@@ -115,6 +125,37 @@ impl SolFrontierServer {
         Parameters(p): Parameters<ProposeIntentParams>,
     ) -> Result<CallToolResult, McpError> {
         let body = propose_intent_json(&p);
+        Ok(CallToolResult::success(vec![Content::text(
+            body.to_string(),
+        )]))
+    }
+
+    /// WRITE. Verify an already-signed funding transfer before advancing state.
+    #[tool(
+        description = "WRITE DATABASE: verify a confirmed Solana funding transaction against the finalized intent, then advance funding_required to budget_reserved; this server never signs or broadcasts"
+    )]
+    async fn confirm_funding(
+        &self,
+        Parameters(p): Parameters<ConfirmFundingParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let body = confirm_funding_json(
+            &p,
+            self.funding_reader.as_ref(),
+            &self.funding_intents,
+            &self.watch_rules,
+            &SystemFundingClock,
+        )
+        .await
+        .map_err(|_| {
+            // Never interpolate provider/state-store errors here. RPC failures
+            // are normal sanitized JSON results; a DB failure may happen after
+            // the first CAS, so retrying the exact same identifiers is safe.
+            tracing::error!("confirm_funding state-store operation failed");
+            McpError::internal_error(
+                "confirm_funding state-store operation failed; retry the same intent_id and tx_signature",
+                None,
+            )
+        })?;
         Ok(CallToolResult::success(vec![Content::text(
             body.to_string(),
         )]))
@@ -222,8 +263,10 @@ struct Cli {
 const INSTRUCTIONS: &str = "SolFrontier is a fail-closed, policy-gated control plane for bounded \
 Solana DeFi intents. The AI proposes; only humans approve and sign (INV-1). finalize_intent is an \
 explicitly labeled database-writing tool: it persists an approved rule and funding requirement, \
-but it never builds, signs, or submits a transaction. Funding/signing happens in the user's own \
-wallet (Phantom) via a separate signing page, never through this server.";
+but it never builds, signs, or submits a transaction. confirm_funding is also explicitly labeled: \
+it only advances database state after a confirmed transaction passes every funding check. \
+Funding/signing happens in the user's own wallet (Phantom) via a separate static signing page, \
+never through this server.";
 
 #[tool_handler]
 impl ServerHandler for SolFrontierServer {
@@ -248,10 +291,11 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    tracing::info!("solfrontier-mcp starting (stdio, Phase 2 finalize slice)");
+    tracing::info!("solfrontier-mcp starting (stdio, Phase 2 funding slice)");
     let position_reader = configured_reader_from_env();
     let quote_source = configured_client_from_env();
     let finalize_market_source = configured_finalize_market_source_from_env();
+    let funding_reader = configured_funding_reader_from_env();
     let intent_sidecar = IntentSidecar::for_database_path(&cli.db);
     let db = Database::open(&DatabaseConfig {
         path: cli.db.to_string_lossy().into_owned(),
@@ -263,6 +307,7 @@ async fn main() -> anyhow::Result<()> {
         position_reader,
         quote_source,
         finalize_market_source,
+        funding_reader,
         intent_sidecar,
     )
     .serve(stdio())
@@ -412,6 +457,7 @@ mod tests {
                 &db,
                 None,
                 configured_client_from_env(),
+                None,
                 None,
                 IntentSidecar::for_database_path(&temporary_database.path),
             );

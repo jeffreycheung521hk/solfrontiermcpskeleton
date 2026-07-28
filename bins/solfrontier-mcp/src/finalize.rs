@@ -60,6 +60,7 @@ pub(crate) const LEGACY_TARGET_OBLIGATION_BS58: &str =
     "BdFLjCcP9mCy557vNNGVbTUuvHxXsh8hc6jXzaPra1wN";
 pub(crate) const MEMO_PROGRAM_ID_BS58: &str = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 pub(crate) const WATCH_RULE_EXPIRY_SLOTS: u64 = 480;
+const SIGNING_PAGE_BASE_URL: &str = "http://127.0.0.1:8080/index.html";
 const FUNDING_WINDOW_MS: i64 = 180_000;
 const FUNDING_WINDOW_SECONDS: i64 = FUNDING_WINDOW_MS / 1_000;
 
@@ -354,6 +355,23 @@ where
         }));
     }
 
+    let funding = json!({
+        "user_wallet": current.user_wallet,
+        "user_usdc_ata": current.user_usdc_ata,
+        "controlled_wallet": current.controlled_wallet,
+        "controlled_usdc_ata": current.controlled_usdc_ata,
+        "mint": USDC_MINT_BS58,
+        "decimals": 6,
+        "amount_raw": current.amount_raw.to_string(),
+        "memo": memo,
+        "memo_program_id": MEMO_PROGRAM_ID_BS58,
+        "instruction_order": ["memo", "transfer_checked"],
+        "funding_window_seconds": FUNDING_WINDOW_SECONDS,
+        "expires_at_ms": response_expires_at_ms,
+    });
+    let signing_page_url =
+        build_signing_page_url(current.status.as_str(), &intent_id, &rule_hash, &funding);
+
     Ok(json!({
         "status": current.status.as_str(),
         "draft_id": params.draft_id,
@@ -365,20 +383,8 @@ where
         "funding_actionable": true,
         "created_at_ms": response_created_at_ms,
         "expires_at_ms": response_expires_at_ms,
-        "funding": {
-            "user_wallet": current.user_wallet,
-            "user_usdc_ata": current.user_usdc_ata,
-            "controlled_wallet": current.controlled_wallet,
-            "controlled_usdc_ata": current.controlled_usdc_ata,
-            "mint": USDC_MINT_BS58,
-            "decimals": 6,
-            "amount_raw": current.amount_raw.to_string(),
-            "memo": memo,
-            "memo_program_id": MEMO_PROGRAM_ID_BS58,
-            "instruction_order": ["memo", "transfer_checked"],
-            "funding_window_seconds": FUNDING_WINDOW_SECONDS,
-            "expires_at_ms": response_expires_at_ms,
-        },
+        "funding": funding,
+        "signing_page_url": signing_page_url,
         "signing": {
             "required": true,
             "performed_by_server": false,
@@ -386,6 +392,39 @@ where
             "note": "The connected Phantom wallet must equal funding.user_wallet. This MCP server never signs.",
         },
     }))
+}
+
+fn build_signing_page_url(
+    status: &str,
+    intent_id: &str,
+    rule_hash: &str,
+    funding: &Value,
+) -> String {
+    let payload = json!({
+        "status": status,
+        "funding_actionable": true,
+        "intent_id": intent_id,
+        "rule_hash": rule_hash,
+        "funding": funding,
+    });
+    let encoded_payload = percent_encode_fragment_component(&payload.to_string());
+    format!("{SIGNING_PAGE_BASE_URL}#payload={encoded_payload}")
+}
+
+fn percent_encode_fragment_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    let mut encoded = String::with_capacity(value.len().saturating_mul(3));
+    for &byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
 }
 
 fn unconfirmed_rule_guard(
@@ -835,6 +874,35 @@ mod tests {
         }
     }
 
+    fn signing_page_payload(response: &Value) -> Value {
+        let url = response["signing_page_url"]
+            .as_str()
+            .expect("actionable response must include a signing-page URL");
+        let encoded = url
+            .strip_prefix(SIGNING_PAGE_BASE_URL)
+            .and_then(|suffix| suffix.strip_prefix("#payload="))
+            .expect("signing instructions must live only in the URL fragment");
+        let bytes = encoded.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'%' {
+                let hex = std::str::from_utf8(
+                    bytes
+                        .get(index + 1..index + 3)
+                        .expect("percent escape must contain two hex digits"),
+                )
+                .expect("percent escape must be ASCII");
+                decoded.push(u8::from_str_radix(hex, 16).expect("percent escape must be hex"));
+                index += 3;
+            } else {
+                decoded.push(bytes[index]);
+                index += 1;
+            }
+        }
+        serde_json::from_slice(&decoded).expect("decoded fragment must be JSON")
+    }
+
     #[test]
     fn finalize_params_reject_unknown_fields() {
         let valid = params_json_with_id(FIRST_DRAFT_ID);
@@ -893,6 +961,10 @@ mod tests {
             response.get("signing").is_none(),
             "an unconfirmed monitoring rule must never invite a signature"
         );
+        assert!(
+            response.get("signing_page_url").is_none(),
+            "an unconfirmed monitoring rule must never expose a signing-page handoff"
+        );
         assert!(response["reason"]
             .as_str()
             .expect("reason is a string")
@@ -935,6 +1007,116 @@ mod tests {
         assert!(
             !derive_sidecar_path(&file.path).exists(),
             "hash mismatch must not create the sidecar"
+        );
+
+        close_test_store(db, watch_rules, funding_intents, sidecar).await;
+    }
+
+    #[tokio::test]
+    async fn corrupt_sidecar_blocks_finalize_before_main_database_writes() {
+        let (file, db, watch_rules, funding_intents, sidecar) = test_store().await;
+        fs::write(derive_sidecar_path(&file.path), b"not a sqlite database")
+            .expect("write corrupt sidecar fixture");
+        let params = params_with_id(FIRST_DRAFT_ID);
+        let market = MockMarketSource::new(vec![snapshot(FIRST_MARKET_SLOT, 165, 210)]);
+        let clock = StepClock::new(FINALIZE_STARTED_AT_MS, CLOCK_STEP_MS);
+
+        let response = finalize_intent_json(
+            &params,
+            Some(&market),
+            &sidecar,
+            &watch_rules,
+            &funding_intents,
+            &clock,
+        )
+        .await
+        .expect("an unavailable sidecar is a normal fail-closed response");
+
+        assert_eq!(response["status"], "sidecar_unavailable");
+        assert_eq!(market.calls(), 0, "market seam must not be called");
+        assert!(
+            response.get("funding").is_none(),
+            "sidecar failure must not expose funding instructions"
+        );
+        assert!(
+            response.get("signing").is_none(),
+            "sidecar failure must not invite a signature"
+        );
+        assert!(watch_rules
+            .get(&expected_rule().rule_id)
+            .await
+            .expect("watch-rule lookup")
+            .is_none());
+        assert!(funding_intents
+            .get(EXPECTED_INTENT_ID)
+            .await
+            .expect("funding-intent lookup")
+            .is_none());
+
+        close_test_store(db, watch_rules, funding_intents, sidecar).await;
+    }
+
+    #[tokio::test]
+    async fn market_data_error_consumes_draft_without_main_database_writes() {
+        let (file, db, watch_rules, funding_intents, sidecar) = test_store().await;
+        let params = params_with_id(FIRST_DRAFT_ID);
+        let failing_market = MockMarketSource::new(vec![]);
+        let clock = StepClock::new(FINALIZE_STARTED_AT_MS, CLOCK_STEP_MS);
+
+        let response = finalize_intent_json(
+            &params,
+            Some(&failing_market),
+            &sidecar,
+            &watch_rules,
+            &funding_intents,
+            &clock,
+        )
+        .await
+        .expect("market failure is a normal fail-closed response");
+
+        assert_eq!(response["status"], "market_data_error");
+        assert_eq!(response["error_class"], "slot_request_failed");
+        assert_eq!(response["draft_consumed"], true);
+        assert_eq!(failing_market.calls(), 1);
+        assert!(
+            response.get("funding").is_none(),
+            "market failure must not expose funding instructions"
+        );
+        assert!(
+            response.get("signing").is_none(),
+            "market failure must not invite a signature"
+        );
+        assert!(
+            derive_sidecar_path(&file.path).exists(),
+            "the consume-before-market tombstone must be durable"
+        );
+        assert!(watch_rules
+            .get(&expected_rule().rule_id)
+            .await
+            .expect("watch-rule lookup")
+            .is_none());
+        assert!(funding_intents
+            .get(EXPECTED_INTENT_ID)
+            .await
+            .expect("funding-intent lookup")
+            .is_none());
+
+        let retry_market = MockMarketSource::new(vec![snapshot(FIRST_MARKET_SLOT, 165, 210)]);
+        let retry = finalize_intent_json(
+            &params,
+            Some(&retry_market),
+            &sidecar,
+            &watch_rules,
+            &funding_intents,
+            &clock,
+        )
+        .await
+        .expect("same-draft retry is a normal response");
+        assert_eq!(retry["status"], "already_finalized_or_missing");
+        assert_eq!(
+            retry_market.calls(),
+            0,
+            "the consumed draft must be rejected before a second market read"
         );
 
         close_test_store(db, watch_rules, funding_intents, sidecar).await;
@@ -1091,6 +1273,31 @@ mod tests {
             response["funding"].get("expiry_seconds").is_none(),
             "the ambiguous legacy output name must not reappear"
         );
+        let signing_payload = signing_page_payload(&response);
+        assert_eq!(signing_payload["status"], "funding_required");
+        assert_eq!(signing_payload["funding_actionable"], true);
+        assert_eq!(signing_payload["intent_id"], EXPECTED_INTENT_ID);
+        assert_eq!(signing_payload["rule_hash"], EXPECTED_RULE_HASH);
+        assert_eq!(
+            signing_payload["funding"], response["funding"],
+            "the fragment must carry the complete funding instruction without reconstruction"
+        );
+        assert_eq!(
+            signing_payload["funding"]["memo"],
+            format!("claw:w5h:{EXPECTED_INTENT_ID}:{EXPECTED_RULE_HASH}"),
+            "the signing page must receive the finalized memo verbatim"
+        );
+        assert_eq!(
+            signing_payload["funding"]["instruction_order"],
+            json!(["memo", "transfer_checked"]),
+            "the signing page must preserve Memo at instruction index 0"
+        );
+        assert_eq!(signing_payload["funding"]["decimals"], 6);
+        assert_eq!(
+            signing_payload["funding"]["expires_at_ms"],
+            FINALIZE_STARTED_AT_MS + CLOCK_STEP_MS + FUNDING_WINDOW_MS
+        );
+        assert_eq!(signing_payload["funding"]["user_wallet"], TEST_USER_WALLET);
         assert_eq!(market.calls(), 1);
 
         let expected_rule = expected_rule();
@@ -1326,6 +1533,10 @@ mod tests {
         assert!(
             expired_response.get("funding").is_none(),
             "expired existing intent must not expose signing instructions"
+        );
+        assert!(
+            expired_response.get("signing_page_url").is_none(),
+            "a non-actionable intent must not expose a signing-page handoff"
         );
 
         close_test_store(db, watch_rules, funding_intents, sidecar).await;
