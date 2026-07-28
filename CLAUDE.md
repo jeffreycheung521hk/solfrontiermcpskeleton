@@ -85,9 +85,7 @@ Phase 2 第一切片 `propose_intent` 已完成;第二切片加入明確標示�
 - **風險:**簽名頁倒數依回傳 deadline 顯示,而 lifecycle/watcher 以主 DB deadline 為準;兩者在邊界附近可能對「已過期」有短暫不同判斷。
 - **觸發條件:**Phase 3 executor 合併評審前,必須明定 DB timestamps 與 tool 回傳 timestamps 的唯一權威來源及過期邊界,並讓 signing page、watcher/lifecycle 使用同一套判定;未完成不得關閉本債。
 
-### DEBT-P2-FINALIZE-4:故障回應測試缺口
+### DEBT-P2-FINALIZE-4（已關閉）:故障回應測試缺口
 
-- **`sidecar_unavailable` 缺口原因:**這不是技術阻塞;可在衍生 sidecar 路徑預置損毀 SQLite,穩定令 claim 回 `Unavailable`。本次依「記錄、不修」範圍只保留既有 lookup corruption 測試,尚未增加 finalize-level 回應契約測試。
-- **`sidecar_unavailable` 補測觸發條件:**首次修改 `IntentSidecar`/claim-to-response 映射,或最遲在 Phase 2 funding(②-3)分支合併前(兩者取最早),必須補測 `status:"sidecar_unavailable"`、主 DB 零寫入且無 `funding`/`signing`。
-- **`market_data_error` 缺口原因:**這也不是技術阻塞;現有 `MockMarketSource` 已可離線回傳 `FinalizeMarketReadError`,只是本次依「記錄、不修」範圍未增加 finalize-level 回應契約測試。
-- **`market_data_error` 補測觸發條件:**首次修改 consume-before-market 順序、`FinalizeMarketDataSource` 或錯誤分類/回應欄位,或最遲在 Phase 2 funding(②-3)分支合併前(條件取最早),必須補測 error class、`draft_consumed:true`、同 draft 不可重用、主 DB 零寫入且無 `funding`/`signing`。
+- **關閉方式:**Phase 2 funding(②-3)開工時已補上兩條 finalize-level 離線契約測試。損毀 SQLite fixture 釘死 `sidecar_unavailable`、主 DB 零寫入且無 `funding`/`signing`;`MockMarketSource` 故障 fixture 釘死固定 error class、`draft_consumed:true`、同 draft 不可重用、主 DB 零寫入且無 `funding`/`signing`。
+- **回歸門檻:**後續修改 `IntentSidecar`/claim-to-response 映射、consume-before-market 順序、`FinalizeMarketDataSource` 或錯誤分類/回應欄位時,上述測試必須繼續通過;不可移除或弱化 fail-closed 斷言。
