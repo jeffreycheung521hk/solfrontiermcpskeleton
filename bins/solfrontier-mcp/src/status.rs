@@ -2,8 +2,13 @@ use claw_state_store::{
     Stage2W5hFundingIntentRepository, Stage2WatchRuleRepository, StoreError, StoredWatchRule,
     W5hFundingIntent,
 };
-use claw_types::ActionSpec;
+use claw_types::{canonical_rule_hash, ActionSpec};
 use serde::Serialize;
+
+use crate::{
+    finalize::hex_lower,
+    sidecar::{HashLookup, IntentSidecar},
+};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct IntentStatusResponse {
@@ -46,22 +51,66 @@ struct ResolvedIntentRef {
 
 #[derive(Debug)]
 enum UnsupportedIntentRef {
-    CanonicalHash,
+    CanonicalHashUnavailable,
+    CanonicalHashInconsistent,
     InvalidFormat,
 }
 
 pub(crate) async fn query_intent_status(
     funding_intents: &Stage2W5hFundingIntentRepository,
     watch_rules: &Stage2WatchRuleRepository,
+    sidecar: &IntentSidecar,
     intent_ref: &str,
 ) -> Result<IntentStatusResponse, StoreError> {
-    let resolved = match resolve_intent_ref(intent_ref) {
-        Ok(resolved) => resolved,
-        Err(reason) => return Ok(unsupported_response(intent_ref, reason)),
+    let candidate = intent_ref.trim();
+    let canonical_hash =
+        if candidate.len() == 64 && candidate.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            Some(candidate.to_ascii_lowercase())
+        } else {
+            None
+        };
+
+    let resolved = if let Some(hash) = canonical_hash.as_deref() {
+        match sidecar.lookup_hash(hash).await {
+            HashLookup::Found { intent_id } => match resolve_uuid_ref(&intent_id) {
+                Ok(resolved) => resolved,
+                Err(_) => {
+                    return Ok(unsupported_response(
+                        intent_ref,
+                        UnsupportedIntentRef::CanonicalHashInconsistent,
+                    ));
+                }
+            },
+            HashLookup::Missing | HashLookup::Unavailable => {
+                return Ok(unsupported_response(
+                    intent_ref,
+                    UnsupportedIntentRef::CanonicalHashUnavailable,
+                ));
+            }
+        }
+    } else {
+        match resolve_uuid_ref(intent_ref) {
+            Ok(resolved) => resolved,
+            Err(reason) => return Ok(unsupported_response(intent_ref, reason)),
+        }
     };
 
     let funding_intent = funding_intents.get(&resolved.intent_id).await?;
     let watch_rule = watch_rules.get(&resolved.rule_id).await?;
+
+    if let Some(hash) = canonical_hash.as_deref() {
+        if !canonical_mapping_matches_main_store(
+            hash,
+            &resolved,
+            funding_intent.as_ref(),
+            watch_rule.as_ref(),
+        ) {
+            return Ok(unsupported_response(
+                intent_ref,
+                UnsupportedIntentRef::CanonicalHashInconsistent,
+            ));
+        }
+    }
 
     Ok(project_status(
         intent_ref,
@@ -167,14 +216,18 @@ fn not_found_response(intent_ref: &str, resolved: ResolvedIntentRef) -> IntentSt
 
 fn unsupported_response(intent_ref: &str, reason: UnsupportedIntentRef) -> IntentStatusResponse {
     let message = match reason {
-        UnsupportedIntentRef::CanonicalHash => {
-            "canonical hash lookup is not exposed by the state-store public API; \
-             use the intent UUID (hyphenated or 32-character hex)"
+        UnsupportedIntentRef::CanonicalHashUnavailable => {
+            "canonical hash lookup is unavailable because the derived MCP sidecar \
+             is missing, unreadable, or has no mapping; use the intent UUID"
+        }
+        UnsupportedIntentRef::CanonicalHashInconsistent => {
+            "canonical hash lookup was rejected because the derived mapping did \
+             not revalidate against the authoritative state-store repositories; \
+             use the intent UUID"
         }
         UnsupportedIntentRef::InvalidFormat => {
             "unsupported intent_ref format; use the intent UUID (hyphenated or \
-             32-character hex). Canonical hash lookup is unavailable through the \
-             current state-store public API"
+             32-character hex) or a 64-character canonical rule hash"
         }
     };
 
@@ -198,12 +251,8 @@ fn unsupported_response(intent_ref: &str, reason: UnsupportedIntentRef) -> Inten
     }
 }
 
-fn resolve_intent_ref(intent_ref: &str) -> Result<ResolvedIntentRef, UnsupportedIntentRef> {
+fn resolve_uuid_ref(intent_ref: &str) -> Result<ResolvedIntentRef, UnsupportedIntentRef> {
     let candidate = intent_ref.trim();
-    if candidate.len() == 64 && candidate.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(UnsupportedIntentRef::CanonicalHash);
-    }
-
     let compact = match candidate.len() {
         32 if candidate.bytes().all(|byte| byte.is_ascii_hexdigit()) => candidate.to_string(),
         36 if has_uuid_hyphens(candidate) => candidate
@@ -228,6 +277,35 @@ fn resolve_intent_ref(intent_ref: &str) -> Result<ResolvedIntentRef, Unsupported
     Ok(ResolvedIntentRef {
         intent_id: compact.to_ascii_lowercase(),
         rule_id,
+    })
+}
+
+fn canonical_mapping_matches_main_store(
+    expected_hash: &str,
+    resolved: &ResolvedIntentRef,
+    funding_intent: Option<&W5hFundingIntent>,
+    watch_rule: Option<&StoredWatchRule>,
+) -> bool {
+    let Some(watch_rule) = watch_rule else {
+        // A funding-only legacy orphan has no authoritative WatchRule bytes
+        // from which the canonical hash can be recomputed.
+        return false;
+    };
+
+    if watch_rule.rule.rule_id != resolved.rule_id
+        || hex_lower(&watch_rule.rule.rule_id) != resolved.intent_id
+        || hex_lower(&watch_rule.canonical_rule_hash) != expected_hash
+        || hex_lower(&canonical_rule_hash(&watch_rule.rule)) != expected_hash
+    {
+        return false;
+    }
+
+    funding_intent.is_none_or(|intent| {
+        intent.intent_id == resolved.intent_id
+            && intent.rule_id_hex == resolved.intent_id
+            && intent
+                .canonical_rule_hash_hex
+                .eq_ignore_ascii_case(expected_hash)
     })
 }
 
@@ -350,14 +428,16 @@ mod tests {
 
     #[tokio::test]
     async fn stored_funding_intent_returns_repository_status_fields() {
-        let (_file, db, funding_intents, watch_rules) = test_store().await;
+        let (file, db, funding_intents, watch_rules) = test_store().await;
         seed_intent_status_fixture(&db)
             .await
             .expect("fixture seed must succeed");
+        let sidecar = IntentSidecar::for_database_path(&file.path);
 
-        let response = query_intent_status(&funding_intents, &watch_rules, DEV_INTENT_UUID)
-            .await
-            .expect("status lookup must succeed");
+        let response =
+            query_intent_status(&funding_intents, &watch_rules, &sidecar, DEV_INTENT_UUID)
+                .await
+                .expect("status lookup must succeed");
 
         assert_eq!(response.intent_ref, DEV_INTENT_UUID);
         assert_eq!(response.status, W5hIntentStatus::FundingRequired.as_str());
@@ -380,9 +460,10 @@ mod tests {
 
     #[tokio::test]
     async fn missing_intent_returns_not_found_without_protocol_error() {
-        let (_file, db, funding_intents, watch_rules) = test_store().await;
+        let (file, db, funding_intents, watch_rules) = test_store().await;
+        let sidecar = IntentSidecar::for_database_path(&file.path);
 
-        let response = query_intent_status(&funding_intents, &watch_rules, DEV_INTENT_ID)
+        let response = query_intent_status(&funding_intents, &watch_rules, &sidecar, DEV_INTENT_ID)
             .await
             .expect("missing rows are a normal query result");
 
@@ -396,11 +477,14 @@ mod tests {
         close_test_store(db, funding_intents, watch_rules).await;
     }
 
-    #[test]
-    fn canonical_hash_reports_public_api_limitation() {
-        let reason = resolve_intent_ref(DEV_CANONICAL_HASH)
-            .expect_err("canonical hash lookup is not publicly exposed");
-        let response = unsupported_response(DEV_CANONICAL_HASH, reason);
+    #[tokio::test]
+    async fn canonical_hash_without_sidecar_mapping_is_unsupported() {
+        let (file, db, funding_intents, watch_rules) = test_store().await;
+        let sidecar = IntentSidecar::for_database_path(&file.path);
+        let response =
+            query_intent_status(&funding_intents, &watch_rules, &sidecar, DEV_CANONICAL_HASH)
+                .await
+                .expect("missing sidecar is a normal result");
 
         assert_eq!(response.intent_ref, DEV_CANONICAL_HASH);
         assert_eq!(response.status, "unsupported_ref");
@@ -408,6 +492,8 @@ mod tests {
         assert!(response
             .message
             .as_deref()
-            .is_some_and(|message| message.contains("state-store public API")));
+            .is_some_and(|message| message.contains("sidecar")));
+
+        close_test_store(db, funding_intents, watch_rules).await;
     }
 }
