@@ -290,3 +290,185 @@ fn quote_error_class(error: QuoteReadError) -> &'static str {
         QuoteReadError::InvalidResponse => "invalid_response",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    struct MockQuoteSource {
+        result: Mutex<Result<SwapQuoteResponse, QuoteReadError>>,
+        requests: Mutex<Vec<SwapQuoteRequest>>,
+    }
+
+    impl MockQuoteSource {
+        fn returning(result: Result<SwapQuoteResponse, QuoteReadError>) -> Self {
+            Self {
+                result: Mutex::new(result),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests.lock().expect("requests lock").len()
+        }
+    }
+
+    impl JupiterQuoteSource for MockQuoteSource {
+        async fn fetch_quote(
+            &self,
+            request: &SwapQuoteRequest,
+        ) -> Result<SwapQuoteResponse, QuoteReadError> {
+            self.requests
+                .lock()
+                .expect("requests lock")
+                .push(request.clone());
+            self.result.lock().expect("result lock").clone()
+        }
+    }
+
+    fn quote_fixture() -> SwapQuoteResponse {
+        SwapQuoteResponse {
+            input_mint: SOL_MINT_BS58.to_owned(),
+            in_amount: "18446744073709551615".to_owned(),
+            output_mint: USDC_MINT_BS58.to_owned(),
+            out_amount: "9007199254740993".to_owned(),
+            other_amount_threshold: "8917127262193583".to_owned(),
+            swap_mode: SwapMode::ExactIn,
+            slippage_bps: 50,
+            price_impact_pct: Some("0.00042".to_owned()),
+            route_plan: vec![RoutePlanStep {
+                swap_info: SwapInfo {
+                    amm_key: "safe-amm-pubkey".to_owned(),
+                    label: Some("MockDEX".to_owned()),
+                    input_mint: SOL_MINT_BS58.to_owned(),
+                    output_mint: USDC_MINT_BS58.to_owned(),
+                    in_amount: "18446744073709551615".to_owned(),
+                    out_amount: "9007199254740993".to_owned(),
+                    fee_amount: Some("42".to_owned()),
+                    fee_mint: Some(USDC_MINT_BS58.to_owned()),
+                },
+                percent: 100,
+            }],
+            context_slot: Some(321_654_987),
+        }
+    }
+
+    #[tokio::test]
+    async fn ok_maps_quote_and_preserves_amount_strings() {
+        let source = MockQuoteSource::returning(Ok(quote_fixture()));
+
+        let response = query_quote(&source, " SOL ", "usdc", "18446744073709551615", 50).await;
+
+        assert_eq!(response["status"], STATUS_OK);
+        assert_eq!(response["input_mint"], SOL_MINT_BS58);
+        assert_eq!(response["output_mint"], USDC_MINT_BS58);
+        assert_eq!(response["input_amount"], "18446744073709551615");
+        assert_eq!(response["in_amount"], "18446744073709551615");
+        assert_eq!(response["out_amount"], "9007199254740993");
+        assert_eq!(response["other_amount_threshold"], "8917127262193583");
+        assert!(response["input_amount"].is_string());
+        assert!(response["in_amount"].is_string());
+        assert!(response["out_amount"].is_string());
+        assert!(response["other_amount_threshold"].is_string());
+        assert_eq!(response["route_summary"], json!(["MockDEX"]));
+
+        let requests = source.requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].input_mint, SOL_MINT_BS58);
+        assert_eq!(requests[0].output_mint, USDC_MINT_BS58);
+        assert_eq!(requests[0].amount, u64::MAX);
+        assert_eq!(requests[0].slippage_bps, 50);
+    }
+
+    #[tokio::test]
+    async fn non_allowlisted_mint_is_policy_blocked_without_provider_call() {
+        let source = MockQuoteSource::returning(Ok(quote_fixture()));
+
+        let response = query_quote(
+            &source,
+            "DezXAZ8z7PnrnRJjz3wXBoRgixCa6j6dx7yAknL2gPj",
+            USDC_MINT_BS58,
+            "1000",
+            50,
+        )
+        .await;
+
+        assert_eq!(response["status"], STATUS_POLICY_BLOCKED);
+        assert_eq!(response["policy_rule_name"], "input-mint-not-allowed");
+        assert_eq!(source.request_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn slippage_above_cap_is_policy_blocked_without_provider_call() {
+        let source = MockQuoteSource::returning(Ok(quote_fixture()));
+
+        let response = query_quote(&source, SOL_MINT_BS58, USDC_MINT_BS58, "1000", 101).await;
+
+        assert_eq!(response["status"], STATUS_POLICY_BLOCKED);
+        assert_eq!(response["policy_rule_name"], "slippage-exceeds-quote-cap");
+        assert_eq!(response["slippage_bps"], 101);
+        assert_eq!(source.request_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn same_mint_is_policy_blocked_without_provider_call() {
+        let source = MockQuoteSource::returning(Ok(quote_fixture()));
+
+        let response = query_quote(&source, SOL_MINT_BS58, SOL_MINT_BS58, "1000", 50).await;
+
+        assert_eq!(response["status"], STATUS_POLICY_BLOCKED);
+        assert_eq!(response["policy_rule_name"], "input-output-mint-equal");
+        assert_eq!(source.request_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn api_error_is_fixed_json_and_server_facing_payload_is_sanitized() {
+        let source = MockQuoteSource::returning(Err(QuoteReadError::RequestFailed));
+
+        let response = query_quote(&source, SOL_MINT_BS58, USDC_MINT_BS58, "1000", 50).await;
+        let serialized = response.to_string();
+
+        assert_eq!(response["status"], STATUS_API_ERROR);
+        assert_eq!(response["reason"], "Jupiter quote request failed");
+        assert_eq!(source.request_count(), 1);
+        for forbidden in [
+            "http://",
+            "https://",
+            "api-key",
+            "provider-body-sentinel",
+            "raw-reqwest-error",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "api_error payload must not contain `{forbidden}`"
+            );
+        }
+    }
+
+    #[test]
+    fn module_has_no_write_signing_or_raw_error_path() {
+        const SOURCE: &str = include_str!("quote.rs");
+        let forbidden = [
+            [".", "post("].concat(),
+            [".text", "().await"].concat(),
+            ["error ", "= %"].concat(),
+            ["base_url ", "= %"].concat(),
+            ["build_", "swap"].concat(),
+            ["send_", "transaction"].concat(),
+            ["sign_", "transaction"].concat(),
+            ["broadcast_", "transaction"].concat(),
+            ["Keypair", "::new("].concat(),
+            ["private", "_key"].concat(),
+            ["tx", "_bytes"].concat(),
+        ];
+
+        for needle in forbidden {
+            assert!(
+                !SOURCE.contains(&needle),
+                "quote module must not contain `{needle}`"
+            );
+        }
+    }
+}
