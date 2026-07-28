@@ -1097,3 +1097,7 @@ fn decode_rule_id(value: &str) -> Option<[u8; 16]> {
     }
     Some(output)
 }
+
+#[cfg(test)]
+#[path = "funding_tests.rs"]
+mod tests;

@@ -874,6 +874,35 @@ mod tests {
         }
     }
 
+    fn signing_page_payload(response: &Value) -> Value {
+        let url = response["signing_page_url"]
+            .as_str()
+            .expect("actionable response must include a signing-page URL");
+        let encoded = url
+            .strip_prefix(SIGNING_PAGE_BASE_URL)
+            .and_then(|suffix| suffix.strip_prefix("#payload="))
+            .expect("signing instructions must live only in the URL fragment");
+        let bytes = encoded.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'%' {
+                let hex = std::str::from_utf8(
+                    bytes
+                        .get(index + 1..index + 3)
+                        .expect("percent escape must contain two hex digits"),
+                )
+                .expect("percent escape must be ASCII");
+                decoded.push(u8::from_str_radix(hex, 16).expect("percent escape must be hex"));
+                index += 3;
+            } else {
+                decoded.push(bytes[index]);
+                index += 1;
+            }
+        }
+        serde_json::from_slice(&decoded).expect("decoded fragment must be JSON")
+    }
+
     #[test]
     fn finalize_params_reject_unknown_fields() {
         let valid = params_json_with_id(FIRST_DRAFT_ID);
@@ -931,6 +960,10 @@ mod tests {
         assert!(
             response.get("signing").is_none(),
             "an unconfirmed monitoring rule must never invite a signature"
+        );
+        assert!(
+            response.get("signing_page_url").is_none(),
+            "an unconfirmed monitoring rule must never expose a signing-page handoff"
         );
         assert!(response["reason"]
             .as_str()
@@ -1240,6 +1273,31 @@ mod tests {
             response["funding"].get("expiry_seconds").is_none(),
             "the ambiguous legacy output name must not reappear"
         );
+        let signing_payload = signing_page_payload(&response);
+        assert_eq!(signing_payload["status"], "funding_required");
+        assert_eq!(signing_payload["funding_actionable"], true);
+        assert_eq!(signing_payload["intent_id"], EXPECTED_INTENT_ID);
+        assert_eq!(signing_payload["rule_hash"], EXPECTED_RULE_HASH);
+        assert_eq!(
+            signing_payload["funding"], response["funding"],
+            "the fragment must carry the complete funding instruction without reconstruction"
+        );
+        assert_eq!(
+            signing_payload["funding"]["memo"],
+            format!("claw:w5h:{EXPECTED_INTENT_ID}:{EXPECTED_RULE_HASH}"),
+            "the signing page must receive the finalized memo verbatim"
+        );
+        assert_eq!(
+            signing_payload["funding"]["instruction_order"],
+            json!(["memo", "transfer_checked"]),
+            "the signing page must preserve Memo at instruction index 0"
+        );
+        assert_eq!(signing_payload["funding"]["decimals"], 6);
+        assert_eq!(
+            signing_payload["funding"]["expires_at_ms"],
+            FINALIZE_STARTED_AT_MS + CLOCK_STEP_MS + FUNDING_WINDOW_MS
+        );
+        assert_eq!(signing_payload["funding"]["user_wallet"], TEST_USER_WALLET);
         assert_eq!(market.calls(), 1);
 
         let expected_rule = expected_rule();
@@ -1475,6 +1533,10 @@ mod tests {
         assert!(
             expired_response.get("funding").is_none(),
             "expired existing intent must not expose signing instructions"
+        );
+        assert!(
+            expired_response.get("signing_page_url").is_none(),
+            "a non-actionable intent must not expose a signing-page handoff"
         );
 
         close_test_store(db, watch_rules, funding_intents, sidecar).await;
