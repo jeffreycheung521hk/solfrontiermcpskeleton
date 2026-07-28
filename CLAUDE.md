@@ -68,6 +68,7 @@ Phase 2 第一切片 `propose_intent` 已完成;第二切片加入明確標示�
 - **目前處理:**draft 已在網絡讀取與主 DB 寫入前被 consume;失敗後必須重新 propose。新 draft 若碰到相同 `rule_id`,沿用舊 collision/readback 路徑嘗試補上 funding row。
 - **測試缺口:**repository 是具體型別,本切片沒有可注入 funding insert/readback 失敗的 seam,所以實際 rule-only 故障路徑無測試覆蓋;此處只記錄缺口,不為測試而改動核心 crate 邊界。
 - **觸發條件:**`Phase 3 executor 上線前,必須決定 watcher 如何對待 orphan/rule-only rows`。
+- **補測觸發條件:**一旦 bin 取得可注入的 funding repository seam、state-store 新增正式 transaction/recovery API,或最遲進入 Phase 3 executor 合併評審(三者取最早),必須加入 funding insert/readback 故障測試,斷言 rule-only row、draft tombstone 與恢復行為。
 
 ### DEBT-P2-FINALIZE-2:funding-only orphan
 
@@ -75,6 +76,7 @@ Phase 2 第一切片 `propose_intent` 已完成;第二切片加入明確標示�
 - **目前處理:**sidecar 只為經公開 repository API 確認的 WatchRule 建立 hash 映射,不替 funding-only orphan 背書,也不把衍生索引冒充主資料。若 funding row 已寫入但 `rule_persisted == false`,新 MCP 回應層 fail closed:回 `status:"rule_unconfirmed"`、`funding_actionable:false`,並完全省略 `funding`/`signing`,避免用戶把資金送進註定無規則可匹配的流程。
 - **測試缺口:**純回應 guard 已有單元測試;但 WatchRule repository 是具體型別,無法注入 insert 加 readback 皆失敗,故實際 funding-only orphan 路徑仍無測試覆蓋。此處只記錄缺口,不改變保留的非交易寫入順序。
 - **觸發條件:**`Phase 3 executor 上線前,必須決定 watcher 如何對待 orphan/rule-only rows`。
+- **補測觸發條件:**一旦 bin 取得可注入的 WatchRule repository seam、state-store 新增正式 transaction/recovery API,或最遲進入 Phase 3 executor 合併評審(三者取最早),必須加入 WatchRule insert/readback 雙失敗測試,同時斷言 orphan row 被保留而回應仍為 `rule_unconfirmed` 且不含入金指引。
 
 ### DEBT-P2-FINALIZE-3:DB 與回傳 funding timestamps 不一致
 
@@ -83,8 +85,9 @@ Phase 2 第一切片 `propose_intent` 已完成;第二切片加入明確標示�
 - **風險:**簽名頁倒數依回傳 deadline 顯示,而 lifecycle/watcher 以主 DB deadline 為準;兩者在邊界附近可能對「已過期」有短暫不同判斷。
 - **觸發條件:**`Phase 3 executor 上線前,必須決定 watcher 如何對待 orphan/rule-only rows`;同次評審必須明定 timestamp 的權威來源與過期邊界。
 
-### DEBT-P2-FINALIZE-4:故障回應測試 seam 缺口
+### DEBT-P2-FINALIZE-4:故障回應測試缺口
 
-- **現況:**`sidecar_unavailable` 與 `market_data_error` 兩條正常 JSON 回應路徑目前沒有測試覆蓋;前者需要注入 sidecar I/O 故障,後者目前的 finalize 整合測試未固定該回應契約。
-- **處理:**本次覆核只誠實記錄,不為補測試而擴張 repository/sidecar 邊界或改動既有行為。
-- **觸發條件:**後續若重構 MCP bin 的 persistence/market seams,必須同時補上這兩條故障回應測試,並保證失敗後不暴露 funding 指引。
+- **`sidecar_unavailable` 缺口原因:**這不是技術阻塞;可在衍生 sidecar 路徑預置損毀 SQLite,穩定令 claim 回 `Unavailable`。本次依「記錄、不修」範圍只保留既有 lookup corruption 測試,尚未增加 finalize-level 回應契約測試。
+- **`sidecar_unavailable` 補測觸發條件:**首次修改 `IntentSidecar`/claim-to-response 映射,或最遲在 Phase 2 funding(②-3)分支合併前(兩者取最早),必須補測 `status:"sidecar_unavailable"`、主 DB 零寫入且無 `funding`/`signing`。
+- **`market_data_error` 缺口原因:**這也不是技術阻塞;現有 `MockMarketSource` 已可離線回傳 `FinalizeMarketReadError`,只是本次依「記錄、不修」範圍未增加 finalize-level 回應契約測試。
+- **`market_data_error` 補測觸發條件:**首次修改 consume-before-market 順序、`FinalizeMarketDataSource` 或錯誤分類/回應欄位,或最遲在 Phase 2 funding(②-3)分支合併前(條件取最早),必須補測 error class、`draft_consumed:true`、同 draft 不可重用、主 DB 零寫入且無 `funding`/`signing`。
