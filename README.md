@@ -23,6 +23,11 @@ default is `./data/solfrontier.db`.
 Leaving it unset does not prevent startup or affect the other tools;
 `get_position` returns normal JSON with `status: "config_missing"`.
 
+`get_quote` uses the public `https://api.jup.ag` base by default. A compatible
+proxy or staging endpoint can be selected with
+`SOLFRONTIER_JUPITER_BASE_URL`; raw HTTP errors, response bodies, and the
+configured URL are never returned or logged.
+
 ### Development smoke-test data
 
 Reusable development fixtures live in `bins/solfrontier-mcp/src/dev_seed.rs`.
@@ -93,3 +98,32 @@ into `.env.example`, `.mcp.json`, an issue, a log, or a screenshot. Then:
    `estimate_unavailable_reason`.
 5. Confirm neither the tool response nor stderr contains the configured
    endpoint or its query string.
+
+### Manual mainnet `get_quote` verification
+
+`get_quote` is a quote-only `GET /swap/v1/quote` client. It cannot build a
+transaction, sign, broadcast, or create an approval. The default Jupiter base
+is public and normally needs no environment configuration. If a compatible
+base override is required, set `SOLFRONTIER_JUPITER_BASE_URL` only in the MCP
+host environment; the server does not auto-load dotenv files.
+
+1. Run `cargo build --release` with the Windows OpenSSL variables above.
+2. Restart Claude Desktop and confirm `tools/list` contains `get_quote`,
+   `get_position`, and `get_intent_status`.
+3. Call `get_quote` with:
+
+   ```json
+   {
+     "input_mint": "So11111111111111111111111111111111111111112",
+     "output_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+     "amount": "10000000",
+     "slippage_bps": 50
+   }
+   ```
+
+4. Expect `status: "ok"`. `input_amount`, `in_amount`, `out_amount`, and
+   `other_amount_threshold` must be JSON strings, not numbers.
+5. Repeat with `slippage_bps: 101`; expect normal tool JSON with
+   `status: "policy_blocked"`. This request must not contact Jupiter.
+6. Confirm neither the tool response nor stderr contains the configured base
+   URL, its query string, a raw reqwest error, or an upstream response body.
