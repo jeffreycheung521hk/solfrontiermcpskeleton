@@ -19,9 +19,18 @@ cargo run --bin solfrontier-mcp   # stdio MCP server
 The state-store path is selected with `--db PATH` or `SOLFRONTIER_DB`; the
 default is `./data/solfrontier.db`.
 
-`get_position` reads its mainnet endpoint only from `SOLFRONTIER_RPC_URL`.
-Leaving it unset does not prevent startup or affect the other tools;
-`get_position` returns normal JSON with `status: "config_missing"`.
+`get_position` and `finalize_intent` read their mainnet endpoint only from
+`SOLFRONTIER_RPC_URL`. Leaving it unset does not prevent startup or affect the
+other tools; `get_position` returns normal JSON with `status:
+"config_missing"`. Finalize consumes its one-shot draft before its market read,
+so configure RPC and restart the server before proposing a draft that you
+intend to finalize.
+
+Finalize also reads the public Save reserve API at the pinned
+`https://api.solend.fi` base to capture the predecessor-compatible APY
+snapshot. There is no Save API key or base-URL override. RPC and Save failures
+are reduced to sanitized error categories; endpoint URLs, query strings,
+provider response bodies, and raw transport errors are not returned or logged.
 
 `get_quote` uses the public `https://api.jup.ag` base by default. A compatible
 proxy or staging endpoint can be selected with
@@ -39,10 +48,13 @@ between `0.10` and `1.00` USDC inclusive and is parsed without floating point;
 
 The raw `original_user_message` exists only long enough to be hashed and is
 neither returned nor persisted. A valid proposal returns `status: "ok"`, a
-typed draft summary, and a 64-character lowercase-hex `draft_hash`; invalid
-input returns normal tool JSON with `status: "invalid_input"`. In both cases,
+typed draft summary, a 64-character lowercase-hex `draft_hash`, and a fresh
+random UUID v4 `draft_id`; invalid input returns normal tool JSON with
+`status: "invalid_input"`. `draft_id` is a non-canonical consume-once handle:
+it is never included in the draft-hash or canonical-rule-hash preimage.
+Proposing does not store either ID. In both success and failure cases,
 `persistence.db_row_exists` is `false`, and this tool performs zero database
-writes, network calls, signatures, or transaction construction.
+writes, sidecar writes, network calls, signatures, or transaction construction.
 
 Example MCP tool arguments:
 
@@ -62,8 +74,107 @@ Example MCP tool arguments:
 }
 ```
 
-Expect `status: "ok"`, a 64-character draft hash, and
+Expect `status: "ok"`, a random `draft_id`, a 64-character draft hash, and
 `persistence.db_row_exists: false`.
+
+### Write-capable Phase 2 `finalize_intent`
+
+`finalize_intent` is deliberately advertised to the MCP host as **WRITE
+DATABASE**. It accepts every proposal field again, plus the exact `draft_id`
+and `draft_hash` returned by `propose_intent`, and the public `user_wallet`
+that will fund the controlled USDC ATA. The external `user_wallet` is resolved
+only at finalize time and is not part of the frozen draft-hash preimage.
+The controlled wallet and controlled USDC ATA remain pinned to the audited
+legacy values; they cannot be replaced through tool input.
+
+Finalize first recomputes the draft hash. A mismatch returns normal JSON with
+`status: "hash_mismatch"` and makes no write. On a match it atomically records
+a consume-once tombstone for `draft_id` in the MCP-owned sidecar before wallet
+validation or network reads. A later configuration or market-data failure
+therefore consumes that draft: fix the problem and call `propose_intent` again
+instead of retrying the same `draft_id`.
+
+The compatible persistence order is intentionally non-transactional:
+WatchRule, derived sidecar mapping, then funding intent. On success the result
+contains `intent_id`, `rule_hash`, and a complete `funding` object: payer
+wallet/ATA, controlled destination ATA, USDC mint/decimals, exact raw amount,
+deadline, Memo program, and the exact Memo text
+`claw:w5h:<intent_id>:<rule_hash>`. This tool does not construct, sign, or
+submit the funding transaction. The three retained partial-write/timestamp
+defects and their Phase 3 gates are recorded in
+[`CLAUDE.md`](CLAUDE.md#技術債).
+
+The deterministic legacy rule ID can collide with a previously finalized
+draft having the same amount and threshold. In that recovery path the main DB
+row remains authoritative: finalize returns its existing wallet, ATA, amount,
+status, and deadline only after fully revalidating the stored rule and funding
+identity. A different funding wallet or conflicting rule/row returns a normal
+`existing_*_conflict` result with no funding instructions. An expired or
+already-advanced existing intent is also non-actionable; finalize never
+manufactures a fresh deadline for it.
+
+The sidecar path is derived by appending
+`.mcp-intent-index.sqlite3` to the configured main DB path. For example:
+
+```text
+./data/solfrontier.db
+./data/solfrontier.db.mcp-intent-index.sqlite3
+```
+
+This sidecar is derived identity/consume metadata, never the lifecycle source
+of truth. A canonical-hash lookup reads the mapped ID, then reloads the
+WatchRule through its public repository and recomputes the rule hash; when a
+funding row exists, its hash and IDs are checked too. If the sidecar is
+missing, corrupt, incompatible, unmapped, or inconsistent,
+`get_intent_status` returns normal JSON with `status: "unsupported_ref"`;
+it does not crash or guess. UUID/`intent_id` lookup continues to use the main
+DB. Do not manually edit or delete the sidecar while relying on its
+consume-once history.
+
+### Manual `propose → finalize → status` MCP verification
+
+Keep the real RPC URL in the MCP host environment and build the release binary
+before starting this flow. The Save read uses its pinned public endpoint and
+needs no additional configuration.
+
+1. Restart the MCP host and verify `tools/list` contains `get_quote`,
+   `get_position`, `get_intent_status`, `propose_intent`, and
+   `finalize_intent`.
+2. Call `propose_intent` with the example arguments above. Copy its exact
+   `draft_id` and `draft_hash`; do not edit any proposal field afterward.
+3. Call `finalize_intent` with the same proposal fields plus the two returned
+   identifiers and the external Phantom funding wallet:
+
+   ```json
+   {
+     "action": "deposit",
+     "protocol": "solend",
+     "asset": "USDC",
+     "display_source": "save",
+     "comparison": "gt",
+     "amount": "0.5",
+     "threshold_bps": 50,
+     "expiry_seconds_after_finalize": 180,
+     "controlled_wallet": "BPfDMmeMBmCbMC1rWh7hwigMBoKGBrKwXxSeUu9hhs5L",
+     "controlled_usdc_ata": "7LFdKcSV7JQYi3or5y9phHVPjhGigu5DDjUakAFbBmk3",
+     "original_user_message": "If Save APY > 0.5%, deposit 0.5 USDC",
+     "draft_id": "<COPY_FROM_PROPOSE>",
+     "draft_hash": "<COPY_FROM_PROPOSE>",
+     "user_wallet": "<PHANTOM_FUNDING_WALLET_PUBKEY>"
+   }
+   ```
+
+4. Approve the host's database-write confirmation. Expect
+   `status: "funding_required"`, a 32-character `intent_id`, a 64-character
+   `rule_hash`, and funding instructions whose Memo embeds both unchanged.
+5. Call `get_intent_status` once with `intent_ref` equal to `rule_hash` and
+   once with `intent_ref` equal to `intent_id`. Both should resolve the same
+   main-DB funding state. If only the hash form returns `unsupported_ref`,
+   treat the sidecar as unavailable and use the returned `intent_id`.
+
+This slice stops at funding instructions. It intentionally does not include a
+Phantom signing page, `confirm_funding`, an HTTP surface, transaction
+construction, or broadcast.
 
 ### Development smoke-test data
 

@@ -33,16 +33,17 @@ SolFrontier(前身 ClawSolana / Solfrontier2026)的 MCP 重構版:一個 policy-
 
 **禁止**重新引入:自製 LLM client / ReAct loop(舊 agent-runtime)、HTTP API surface(舊 api crate)、chat UI。這些由 MCP host 提供。
 
-## 目前階段:Phase 2(草稿提案)
+## 目前階段:Phase 2(草稿提案 → finalize)
 
 Phase 1 已完成:`get_quote`、`get_position`、`get_intent_status` 三個唯讀 tools 已分別接上 Jupiter、Solana RPC/Solend 與 state-store 真實後端,並通過 stdio MCP 驗證。
 
-本階段從 `propose_intent` 開始:
+Phase 2 第一切片 `propose_intent` 已完成;第二切片加入明確標示會寫 DB 的 `finalize_intent`:
 
 1. MCP host 直接提供由 schemars schema 驗證的 typed 參數;不移植舊 `stage2_llm_intent_extractor`。
-2. `propose_intent` 只驗證條件、精確解析 USDC 金額並計算向後相容的 canonical draft hash;此時 `No DB row exists at this point`。
-3. 此切片零 DB 寫入、零網絡呼叫、零簽名、零交易建構;`finalize_intent` 和任何寫入/執行路徑不在範圍。
-4. Phase 2 後續見建議書 §4;每個寫路徑切片必須獨立評審。
+2. `propose_intent` 只驗證條件、精確解析 USDC 金額、計算向後相容的 canonical draft hash,並產生隨機且非正典的 `draft_id`;此時 `No DB row exists at this point`。`draft_id` 不得進入 draft hash 或 canonical rule hash 的 preimage。
+3. `finalize_intent` 重算並核對 draft hash,在 bin 自有 sidecar consume `draft_id`,讀取可信的 Solana slot/native APR 與 Save APY,再依舊系統的非事務順序建立 WatchRule 與 funding intent。此 tool 會寫資料庫,但仍然零簽名、零交易建構、零廣播。
+4. Controlled wallet/ATA 延續舊系統固定值;外部出資者由 finalize 的 `user_wallet` 明確提供,不得用 controlled wallet 冒充。
+5. 入金簽名頁、`confirm_funding`、watcher/executor 都不在本切片;Phase 2 後續見建議書 §4,每個寫路徑切片必須獨立評審。
 
 ## 工程紀律
 
@@ -55,9 +56,27 @@ Phase 1 已完成:`get_quote`、`get_position`、`get_intent_status` 三個唯�
 
 ## 技術債
 
-### DEBT-MCP-1:canonical hash 尚無公開反查 API
+### DEBT-MCP-1（已關閉）:canonical hash 公開反查缺口
 
-- **現況:**`Stage2W5hFundingIntentRepository::get` 只接受 32-hex `intent_id`,`Stage2WatchRuleRepository::get` 只接受 16-byte rule UUID。64-hex canonical hash 無公開 lookup;`get_intent_status` 對這類輸入回正常 JSON `status:"unsupported_ref"`,不冒充 `not_found` 或 MCP protocol error。
-- **為何暫不修:**Phase 1 的約束是不動六個核心 crate 及其邊界;在 bin 直接讀 table 或複製 SQL 也會繞過 `claw-state-store` 的公開 repository 邊界。
-- **觸發條件:**Phase 2 的 `finalize_intent` 會把 canonical hash 交給用戶,屆時 status-by-hash 成為必要能力。
-- **屆時二選一:**(1)在 `claw-state-store` 增加公開 hash lookup API,視為正式邊界變更並單獨評審;(2)由 MCP bin 維護自己的 `canonical_hash → intent_id` 索引,保持核心 crate 邊界不變。
+- **關閉方式:**Phase 2 finalize 在 MCP bin 維護與主 DB 分離的衍生 sidecar,記錄 `canonical_rule_hash → intent_id`;沒有修改六個核心 crate、repository API 或主資料庫 schema,也沒有從 bin 對主 DB 寫直接 SQL。
+- **唯一真相源:**主 DB 的 WatchRule 與 funding intent 是唯一真相。sidecar 只負責解析識別碼;每次命中後仍須透過公開 repository API 讀回 WatchRule、重算並核對 canonical rule hash,若 funding intent 存在也必須核對其 hash/ID,不得直接信任 sidecar。
+- **優雅降級:**sidecar 遺失、損毀、schema 不相容、無映射或映射與主 DB 不一致時,hash 反查回正常 JSON `status:"unsupported_ref"`,不崩潰、不誤答;`intent_id`/UUID 查詢仍以主 DB 為準。
+
+### DEBT-P2-FINALIZE-1:rule-only row
+
+- **現況:**為逐字保留舊 bridge 的非事務語意,finalize 先寫 WatchRule,再寫 sidecar 與 funding intent。若程序在第一個主 DB 寫入後中斷,或後續 funding insert 失敗,會留下沒有 funding row 的 rule-only row;沒有 rollback 或 startup reconciler。
+- **目前處理:**draft 已在網絡讀取與主 DB 寫入前被 consume;失敗後必須重新 propose。新 draft 若碰到相同 `rule_id`,沿用舊 collision/readback 路徑嘗試補上 funding row。
+- **觸發條件:**`Phase 3 executor 上線前,必須決定 watcher 如何對待 orphan/rule-only rows`。
+
+### DEBT-P2-FINALIZE-2:funding-only orphan
+
+- **現況:**舊 bridge 在 WatchRule insert 失敗且公開 `get` 也無法確認既有 row 時,仍繼續嘗試寫 funding intent。主 DB 沒有跨 repository transaction/FK,因此可能留下沒有 WatchRule 的 funding-only orphan;本切片為忠實相容而保留此缺陷。
+- **目前處理:**sidecar 只為經公開 repository API 確認的 WatchRule 建立 hash 映射,不替 funding-only orphan 背書,也不把衍生索引冒充主資料。
+- **觸發條件:**`Phase 3 executor 上線前,必須決定 watcher 如何對待 orphan/rule-only rows`。
+
+### DEBT-P2-FINALIZE-3:DB 與回傳 funding timestamps 不一致
+
+- **現況:**舊 wiring 在 consume draft 並解析 wallet 後、market reads 前擷取回傳用時間,bridge 則在網絡讀取完成後才用另一個 `now` 寫入 funding row。故**新插入**的 DB `created_at_ms`/`expires_at_ms` 可能比 tool 回傳值晚一段網絡延遲;本切片逐字保留這個 fresh-insert 差異。
+- **安全例外:**deterministic `intent_id` collision 走「回既有行」時,不得沿用舊 outer DTO 以本次 request wallet 與新 deadline 拼出 hybrid 指引。MCP bin 會完整核對既有 WatchRule/funding identity;只在同一 funding wallet、仍為 `funding_required` 且既有 deadline 未過期時,回傳主 DB 既有 wallet/ATA/amount/timestamps。wallet、rule shape 或 identity 衝突皆 fail closed 且不給 funding 指引;既有 deadline 已過或 lifecycle 已前進時亦不給可簽指引。
+- **風險:**簽名頁倒數依回傳 deadline 顯示,而 lifecycle/watcher 以主 DB deadline 為準;兩者在邊界附近可能對「已過期」有短暫不同判斷。
+- **觸發條件:**`Phase 3 executor 上線前,必須決定 watcher 如何對待 orphan/rule-only rows`;同次評審必須明定 timestamp 的權威來源與過期邊界。
