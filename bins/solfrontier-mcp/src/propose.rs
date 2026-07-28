@@ -429,3 +429,193 @@ pub(crate) fn parse_usdc_amount_to_raw(value: &str) -> Result<u64, AmountParseEr
     }
     Ok(raw)
 }
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    const CONTROLLED_WALLET: &str = "BPfDMmeMBmCbMC1rWh7hwigMBoKGBrKwXxSeUu9hhs5L";
+    const CONTROLLED_USDC_ATA: &str = "7LFdKcSV7JQYi3or5y9phHVPjhGigu5DDjUakAFbBmk3";
+    const GOLDEN_CANONICAL_JSON: &str = concat!(
+        r#"{"action":"deposit","amount_raw":"500000","asset":"USDC","#,
+        r#""comparison":"gt","controlled_usdc_ata":"#,
+        r#""7LFdKcSV7JQYi3or5y9phHVPjhGigu5DDjUakAFbBmk3","#,
+        r#""controlled_wallet":"#,
+        r#""BPfDMmeMBmCbMC1rWh7hwigMBoKGBrKwXxSeUu9hhs5L","#,
+        r#""display_source":"save","expiry_seconds_after_finalize":180,"#,
+        r#""original_user_message_hash":"#,
+        r#""0000000000000000000000000000000000000000000000000000000000000000","#,
+        r#""protocol":"solend","threshold_bps":50}"#
+    );
+    const GOLDEN_DRAFT_HASH: &str =
+        "be4f4017348ed4b2e9d49b5a02f89f74903f831f593129cdec56c56b18ba43f2";
+
+    pub(crate) fn valid_params() -> ProposeIntentParams {
+        ProposeIntentParams {
+            action: DraftActionParam::Deposit,
+            protocol: DraftProtocolParam::Solend,
+            asset: DraftAssetParam::Usdc,
+            display_source: DraftDisplaySourceParam::Save,
+            comparison: DraftComparisonParam::Gt,
+            amount: "0.5".to_owned(),
+            threshold_bps: 50,
+            expiry_seconds_after_finalize: EXPIRY_SECONDS_AFTER_FINALIZE,
+            controlled_wallet: CONTROLLED_WALLET.to_owned(),
+            controlled_usdc_ata: CONTROLLED_USDC_ATA.to_owned(),
+            original_user_message: "If Save APY > 0.5%, deposit 0.5 USDC".to_owned(),
+        }
+    }
+
+    fn golden_preimage() -> CanonicalDraftPreimage {
+        CanonicalDraftPreimage {
+            action: "deposit".to_owned(),
+            amount_raw: "500000".to_owned(),
+            asset: "USDC".to_owned(),
+            comparison: "gt".to_owned(),
+            controlled_usdc_ata: CONTROLLED_USDC_ATA.to_owned(),
+            controlled_wallet: CONTROLLED_WALLET.to_owned(),
+            display_source: "save".to_owned(),
+            expiry_seconds_after_finalize: 180,
+            original_user_message_hash: "0".repeat(64),
+            protocol: "solend".to_owned(),
+            threshold_bps: 50,
+        }
+    }
+
+    #[test]
+    fn predecessor_golden_preimage_and_hash_are_exact() {
+        let preimage = golden_preimage();
+
+        assert_eq!(
+            serde_json::to_string(&preimage).expect("serialize golden preimage"),
+            GOLDEN_CANONICAL_JSON
+        );
+        assert_eq!(GOLDEN_CANONICAL_JSON.len(), 406);
+        assert_eq!(compute_draft_hash(&preimage), GOLDEN_DRAFT_HASH);
+    }
+
+    #[test]
+    fn identical_typed_input_produces_identical_hash() {
+        let params = valid_params();
+
+        let first = propose_intent_json(&params);
+        let second = propose_intent_json(&params);
+
+        assert_eq!(first["status"], "ok");
+        assert_eq!(first["draft_hash"], second["draft_hash"]);
+        assert_eq!(first["draft_hash"].as_str().expect("draft hash").len(), 64);
+        assert_eq!(first["draft"]["amount_raw"], 500_000);
+        assert_eq!(
+            first["persistence"]["note"],
+            "No DB row exists at this point"
+        );
+        assert_eq!(first["persistence"]["db_row_exists"], false);
+        assert_eq!(first["side_effects"]["database_writes"], 0);
+        assert_eq!(first["side_effects"]["network_calls"], 0);
+        assert_eq!(first["side_effects"]["signatures"], 0);
+        assert!(
+            !first.to_string().contains(&params.original_user_message),
+            "raw user message must not be returned"
+        );
+    }
+
+    #[test]
+    fn invalid_amount_formats_are_rejected_by_category() {
+        for amount in ["", "-0.5", "+0.5", "abc", "1.2.3", "0.1234567", "0"] {
+            let mut params = valid_params();
+            params.amount = amount.to_owned();
+
+            let response = propose_intent_json(&params);
+
+            assert_eq!(response["status"], "invalid_input", "amount={amount:?}");
+            assert_eq!(
+                response["error_code"], "amount_format_invalid",
+                "amount={amount:?}"
+            );
+            assert_eq!(response["persistence"]["db_row_exists"], false);
+        }
+    }
+
+    #[test]
+    fn amounts_outside_supported_band_are_rejected() {
+        for amount in ["0.09", "1.01"] {
+            let mut params = valid_params();
+            params.amount = amount.to_owned();
+
+            let response = propose_intent_json(&params);
+
+            assert_eq!(response["status"], "invalid_input", "amount={amount}");
+            assert_eq!(response["error_code"], "amount_out_of_range");
+        }
+    }
+
+    #[test]
+    fn threshold_outside_inclusive_bounds_is_rejected() {
+        for threshold_bps in [0, MAX_THRESHOLD_BPS + 1] {
+            let mut params = valid_params();
+            params.threshold_bps = threshold_bps;
+
+            let response = propose_intent_json(&params);
+
+            assert_eq!(
+                response["status"], "invalid_input",
+                "threshold_bps={threshold_bps}"
+            );
+            assert_eq!(response["error_code"], "threshold_bps_out_of_range");
+        }
+    }
+
+    #[test]
+    fn expiry_must_match_frozen_post_finalize_window() {
+        for expiry_seconds_after_finalize in [0, 179, 181] {
+            let mut params = valid_params();
+            params.expiry_seconds_after_finalize = expiry_seconds_after_finalize;
+
+            let response = propose_intent_json(&params);
+
+            assert_eq!(
+                response["status"], "invalid_input",
+                "expiry={expiry_seconds_after_finalize}"
+            );
+            assert_eq!(response["error_code"], "expiry_unsupported");
+        }
+    }
+
+    #[test]
+    fn predecessor_decimal_parser_edge_cases_remain_compatible() {
+        assert_eq!(parse_usdc_amount_to_raw(".5"), Ok(500_000));
+        assert_eq!(parse_usdc_amount_to_raw("1."), Ok(1_000_000));
+        assert_eq!(parse_usdc_amount_to_raw(" 0.123456 "), Ok(123_456));
+        assert_eq!(
+            parse_usdc_amount_to_raw("0.1234567"),
+            Err(AmountParseError::TooManyDecimals)
+        );
+    }
+
+    #[test]
+    fn pure_calculation_module_imports_no_known_side_effect_capability() {
+        const SOURCE: &str = include_str!("propose.rs");
+        let forbidden = [
+            ["Data", "base"].concat(),
+            ["Repository", "::"].concat(),
+            ["req", "west"].concat(),
+            ["Rpc", "Pool"].concat(),
+            [".", "post("].concat(),
+            [".", "send("].concat(),
+            ["write", "_all("].concat(),
+            ["fs", "::write("].concat(),
+            ["sqlx", "::query"].concat(),
+            ["Keypair", "::new("].concat(),
+            ["send_", "transaction"].concat(),
+            ["sign_", "transaction"].concat(),
+            ["broadcast_", "transaction"].concat(),
+        ];
+
+        for needle in forbidden {
+            assert!(
+                !SOURCE.contains(&needle),
+                "pure proposal calculation module must not contain `{needle}`"
+            );
+        }
+    }
+}
