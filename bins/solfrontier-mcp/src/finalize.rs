@@ -985,6 +985,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn market_data_error_consumes_draft_without_main_database_writes() {
+        let (file, db, watch_rules, funding_intents, sidecar) = test_store().await;
+        let params = params_with_id(FIRST_DRAFT_ID);
+        let failing_market = MockMarketSource::new(vec![]);
+        let clock = StepClock::new(FINALIZE_STARTED_AT_MS, CLOCK_STEP_MS);
+
+        let response = finalize_intent_json(
+            &params,
+            Some(&failing_market),
+            &sidecar,
+            &watch_rules,
+            &funding_intents,
+            &clock,
+        )
+        .await
+        .expect("market failure is a normal fail-closed response");
+
+        assert_eq!(response["status"], "market_data_error");
+        assert_eq!(response["error_class"], "slot_request_failed");
+        assert_eq!(response["draft_consumed"], true);
+        assert_eq!(failing_market.calls(), 1);
+        assert!(
+            response.get("funding").is_none(),
+            "market failure must not expose funding instructions"
+        );
+        assert!(
+            response.get("signing").is_none(),
+            "market failure must not invite a signature"
+        );
+        assert!(
+            derive_sidecar_path(&file.path).exists(),
+            "the consume-before-market tombstone must be durable"
+        );
+        assert!(watch_rules
+            .get(&expected_rule().rule_id)
+            .await
+            .expect("watch-rule lookup")
+            .is_none());
+        assert!(funding_intents
+            .get(EXPECTED_INTENT_ID)
+            .await
+            .expect("funding-intent lookup")
+            .is_none());
+
+        let retry_market = MockMarketSource::new(vec![snapshot(FIRST_MARKET_SLOT, 165, 210)]);
+        let retry = finalize_intent_json(
+            &params,
+            Some(&retry_market),
+            &sidecar,
+            &watch_rules,
+            &funding_intents,
+            &clock,
+        )
+        .await
+        .expect("same-draft retry is a normal response");
+        assert_eq!(retry["status"], "already_finalized_or_missing");
+        assert_eq!(
+            retry_market.calls(),
+            0,
+            "the consumed draft must be rejected before a second market read"
+        );
+
+        close_test_store(db, watch_rules, funding_intents, sidecar).await;
+    }
+
+    #[tokio::test]
     async fn missing_market_config_does_not_consume_draft_or_create_sidecar() {
         let (file, db, watch_rules, funding_intents, sidecar) = test_store().await;
         let params = params_with_id(FIRST_DRAFT_ID);
