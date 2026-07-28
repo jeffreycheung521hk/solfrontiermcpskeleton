@@ -1,23 +1,28 @@
 //! solfrontier-mcp — MCP stdio server for the SolFrontier bounded-intent control plane.
 //!
 //! Phase 1 is complete: get_quote / get_position / get_intent_status are
-//! wired to real read backends over stdio. Phase 2 starts with
-//! propose_intent, a pure draft calculator with no persistence, network,
-//! signing, transaction construction, or watcher path.
+//! wired to real read backends over stdio. Phase 2 adds a pure
+//! `propose_intent` calculator and an explicitly write-capable
+//! `finalize_intent` bridge. Finalize verifies the proposal hash, consumes a
+//! random non-canonical draft id, and creates the legacy-compatible WatchRule
+//! plus funding-intent rows. It still performs no signing, transaction
+//! construction, broadcast, or watcher/executor action.
 //!
 //! System invariants INV-1..INV-8 (原 ARCHITECTURE.md) apply verbatim.
 //! In particular: this binary must NEVER hold main-wallet key material,
-//! and no tool in the current proposal-only slice may persist, sign, or
-//! submit a transaction.
+//! and no tool may sign or submit a transaction.
 //!
 //! API shape follows the official rmcp 1.7 counter/calculator examples
 //! (Parameters wrapper + CallToolResult).
 
 #[cfg(test)]
 mod dev_seed;
+mod finalize;
+mod finalize_market;
 mod position;
 mod propose;
 mod quote;
+mod sidecar;
 mod solend_raw;
 mod status;
 
@@ -34,9 +39,14 @@ use rmcp::{
 };
 use std::path::PathBuf;
 
+use crate::finalize::{finalize_intent_json, FinalizeIntentParams, SystemFinalizeClock};
+use crate::finalize_market::{
+    configured_finalize_market_source_from_env, RpcSaveFinalizeMarketSource,
+};
 use crate::position::{configured_reader_from_env, query_position, RpcSolendPositionReader};
 use crate::propose::{propose_intent_json, ProposeIntentParams};
 use crate::quote::{configured_client_from_env, query_quote, HttpJupiterClient};
+use crate::sidecar::IntentSidecar;
 use crate::status::query_intent_status;
 
 // ── Tool parameter types (schemars 1.x → JSON Schema, host 端自動看到) ──
@@ -61,7 +71,7 @@ struct GetPositionParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct GetIntentStatusParams {
-    /// Intent UUID. A canonical SHA-256 hash currently returns `unsupported_ref`.
+    /// Intent UUID or canonical rule SHA-256 hash.
     intent_ref: String,
 }
 
@@ -73,6 +83,8 @@ struct SolFrontierServer {
     watch_rules: Stage2WatchRuleRepository,
     position_reader: Option<RpcSolendPositionReader>,
     quote_source: HttpJupiterClient,
+    finalize_market_source: Option<RpcSaveFinalizeMarketSource>,
+    intent_sidecar: IntentSidecar,
 }
 
 #[tool_router]
@@ -81,12 +93,16 @@ impl SolFrontierServer {
         db: &Database,
         position_reader: Option<RpcSolendPositionReader>,
         quote_source: HttpJupiterClient,
+        finalize_market_source: Option<RpcSaveFinalizeMarketSource>,
+        intent_sidecar: IntentSidecar,
     ) -> Self {
         Self {
             funding_intents: Stage2W5hFundingIntentRepository::new(db.pool().clone()),
             watch_rules: Stage2WatchRuleRepository::new(db.pool().clone()),
             position_reader,
             quote_source,
+            finalize_market_source,
+            intent_sidecar,
         }
     }
 
@@ -99,6 +115,32 @@ impl SolFrontierServer {
         Parameters(p): Parameters<ProposeIntentParams>,
     ) -> Result<CallToolResult, McpError> {
         let body = propose_intent_json(&p);
+        Ok(CallToolResult::success(vec![Content::text(
+            body.to_string(),
+        )]))
+    }
+
+    /// WRITE. Consume an approved draft and create its funding-required rows.
+    #[tool(
+        description = "WRITE DATABASE: finalize an approved typed draft after rechecking its draft_hash; creates the WatchRule and funding-intent rows, but never signs or submits a transaction"
+    )]
+    async fn finalize_intent(
+        &self,
+        Parameters(p): Parameters<FinalizeIntentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let body = finalize_intent_json(
+            &p,
+            self.finalize_market_source.as_ref(),
+            &self.intent_sidecar,
+            &self.watch_rules,
+            &self.funding_intents,
+            &SystemFinalizeClock,
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "finalize_intent state-store operation failed");
+            McpError::internal_error("finalize state-store operation failed", None)
+        })?;
         Ok(CallToolResult::success(vec![Content::text(
             body.to_string(),
         )]))
@@ -139,18 +181,23 @@ impl SolFrontierServer {
 
     /// READ-ONLY. Bounded-intent lifecycle state from the state store.
     #[tool(
-        description = "Get bounded-intent lifecycle status by UUID (read-only); canonical hash lookup currently returns unsupported_ref"
+        description = "Get bounded-intent lifecycle status by UUID or indexed canonical rule hash (read-only; missing/corrupt derived index degrades to unsupported_ref)"
     )]
     async fn get_intent_status(
         &self,
         Parameters(p): Parameters<GetIntentStatusParams>,
     ) -> Result<CallToolResult, McpError> {
-        let response = query_intent_status(&self.funding_intents, &self.watch_rules, &p.intent_ref)
-            .await
-            .map_err(|error| {
-                tracing::error!(error = %error, "get_intent_status state-store query failed");
-                McpError::internal_error("state-store query failed", None)
-            })?;
+        let response = query_intent_status(
+            &self.funding_intents,
+            &self.watch_rules,
+            &self.intent_sidecar,
+            &p.intent_ref,
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "get_intent_status state-store query failed");
+            McpError::internal_error("state-store query failed", None)
+        })?;
         let body = serde_json::to_string(&response).map_err(|error| {
             tracing::error!(error = %error, "get_intent_status response serialization failed");
             McpError::internal_error("intent status serialization failed", None)
@@ -173,10 +220,10 @@ struct Cli {
 }
 
 const INSTRUCTIONS: &str = "SolFrontier is a fail-closed, policy-gated control plane for bounded \
-Solana DeFi intents. The AI proposes; only humans approve and sign (INV-1). Current tools are \
-read-only or pure draft calculations: nothing here persists a proposal, builds, signs, or submits \
-a transaction. Funding/signing always happens in the user's own wallet (Phantom) via a separate \
-signing page, never through this server.";
+Solana DeFi intents. The AI proposes; only humans approve and sign (INV-1). finalize_intent is an \
+explicitly labeled database-writing tool: it persists an approved rule and funding requirement, \
+but it never builds, signs, or submits a transaction. Funding/signing happens in the user's own \
+wallet (Phantom) via a separate signing page, never through this server.";
 
 #[tool_handler]
 impl ServerHandler for SolFrontierServer {
@@ -201,17 +248,25 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    tracing::info!("solfrontier-mcp starting (stdio, Phase 2 proposal-only slice)");
+    tracing::info!("solfrontier-mcp starting (stdio, Phase 2 finalize slice)");
     let position_reader = configured_reader_from_env();
     let quote_source = configured_client_from_env();
+    let finalize_market_source = configured_finalize_market_source_from_env();
+    let intent_sidecar = IntentSidecar::for_database_path(&cli.db);
     let db = Database::open(&DatabaseConfig {
         path: cli.db.to_string_lossy().into_owned(),
         ..DatabaseConfig::default()
     })
     .await?;
-    let service = SolFrontierServer::new(&db, position_reader, quote_source)
-        .serve(stdio())
-        .await?;
+    let service = SolFrontierServer::new(
+        &db,
+        position_reader,
+        quote_source,
+        finalize_market_source,
+        intent_sidecar,
+    )
+    .serve(stdio())
+    .await?;
     service.waiting().await?;
     Ok(())
 }
@@ -342,13 +397,24 @@ mod tests {
         let temporary_database = TemporaryDatabase::new();
         let runtime = tokio::runtime::Runtime::new().expect("create isolated test runtime");
         let (before, after) = runtime.block_on(async {
+            let sidecar_path = crate::sidecar::derive_sidecar_path(&temporary_database.path);
+            assert!(
+                !sidecar_path.exists(),
+                "test starts without a finalize sidecar"
+            );
             let db = Database::open(&DatabaseConfig {
                 path: temporary_database.path.to_string_lossy().into_owned(),
                 ..DatabaseConfig::default()
             })
             .await
             .expect("open migrated test database");
-            let server = SolFrontierServer::new(&db, None, configured_client_from_env());
+            let server = SolFrontierServer::new(
+                &db,
+                None,
+                configured_client_from_env(),
+                None,
+                IntentSidecar::for_database_path(&temporary_database.path),
+            );
 
             // Startup migrations are allowed. Close every shared pool connection,
             // then establish the baseline so only the tool call is measured.
@@ -371,6 +437,10 @@ mod tests {
             assert_eq!(body["draft_hash"].as_str().expect("draft hash").len(), 64);
 
             let after = temporary_database.snapshot();
+            assert!(
+                !sidecar_path.exists(),
+                "propose_intent must not create its finalize sidecar"
+            );
             drop(server);
             drop(db);
             (before, after)

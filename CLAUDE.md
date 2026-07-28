@@ -33,16 +33,17 @@ SolFrontier(前身 ClawSolana / Solfrontier2026)的 MCP 重構版:一個 policy-
 
 **禁止**重新引入:自製 LLM client / ReAct loop(舊 agent-runtime)、HTTP API surface(舊 api crate)、chat UI。這些由 MCP host 提供。
 
-## 目前階段:Phase 2(草稿提案)
+## 目前階段:Phase 2(草稿提案 → finalize)
 
 Phase 1 已完成:`get_quote`、`get_position`、`get_intent_status` 三個唯讀 tools 已分別接上 Jupiter、Solana RPC/Solend 與 state-store 真實後端,並通過 stdio MCP 驗證。
 
-本階段從 `propose_intent` 開始:
+Phase 2 第一切片 `propose_intent` 已完成;第二切片加入明確標示會寫 DB 的 `finalize_intent`:
 
 1. MCP host 直接提供由 schemars schema 驗證的 typed 參數;不移植舊 `stage2_llm_intent_extractor`。
-2. `propose_intent` 只驗證條件、精確解析 USDC 金額並計算向後相容的 canonical draft hash;此時 `No DB row exists at this point`。
-3. 此切片零 DB 寫入、零網絡呼叫、零簽名、零交易建構;`finalize_intent` 和任何寫入/執行路徑不在範圍。
-4. Phase 2 後續見建議書 §4;每個寫路徑切片必須獨立評審。
+2. `propose_intent` 只驗證條件、精確解析 USDC 金額、計算向後相容的 canonical draft hash,並產生隨機且非正典的 `draft_id`;此時 `No DB row exists at this point`。`draft_id` 不得進入 draft hash 或 canonical rule hash 的 preimage。
+3. `finalize_intent` 重算並核對 draft hash,在 bin 自有 sidecar consume `draft_id`,讀取可信的 Solana slot/native APR 與 Save APY,再依舊系統的非事務順序建立 WatchRule 與 funding intent。此 tool 會寫資料庫,但仍然零簽名、零交易建構、零廣播。
+4. Controlled wallet/ATA 延續舊系統固定值;外部出資者由 finalize 的 `user_wallet` 明確提供,不得用 controlled wallet 冒充。
+5. 入金簽名頁、`confirm_funding`、watcher/executor 都不在本切片;Phase 2 後續見建議書 §4,每個寫路徑切片必須獨立評審。
 
 ## 工程紀律
 
@@ -55,9 +56,38 @@ Phase 1 已完成:`get_quote`、`get_position`、`get_intent_status` 三個唯�
 
 ## 技術債
 
-### DEBT-MCP-1:canonical hash 尚無公開反查 API
+### DEBT-MCP-1（已關閉）:canonical hash 公開反查缺口
 
-- **現況:**`Stage2W5hFundingIntentRepository::get` 只接受 32-hex `intent_id`,`Stage2WatchRuleRepository::get` 只接受 16-byte rule UUID。64-hex canonical hash 無公開 lookup;`get_intent_status` 對這類輸入回正常 JSON `status:"unsupported_ref"`,不冒充 `not_found` 或 MCP protocol error。
-- **為何暫不修:**Phase 1 的約束是不動六個核心 crate 及其邊界;在 bin 直接讀 table 或複製 SQL 也會繞過 `claw-state-store` 的公開 repository 邊界。
-- **觸發條件:**Phase 2 的 `finalize_intent` 會把 canonical hash 交給用戶,屆時 status-by-hash 成為必要能力。
-- **屆時二選一:**(1)在 `claw-state-store` 增加公開 hash lookup API,視為正式邊界變更並單獨評審;(2)由 MCP bin 維護自己的 `canonical_hash → intent_id` 索引,保持核心 crate 邊界不變。
+- **關閉方式:**Phase 2 finalize 在 MCP bin 維護與主 DB 分離的衍生 sidecar,記錄 `canonical_rule_hash → intent_id`;沒有修改六個核心 crate、repository API 或主資料庫 schema,也沒有從 bin 對主 DB 寫直接 SQL。
+- **唯一真相源:**主 DB 的 WatchRule 與 funding intent 是唯一真相。sidecar 只負責解析識別碼;每次命中後仍須透過公開 repository API 讀回 WatchRule、重算並核對 canonical rule hash,若 funding intent 存在也必須核對其 hash/ID,不得直接信任 sidecar。
+- **優雅降級:**sidecar 遺失、損毀、schema 不相容、無映射或映射與主 DB 不一致時,hash 反查回正常 JSON `status:"unsupported_ref"`,不崩潰、不誤答;`intent_id`/UUID 查詢仍以主 DB 為準。
+
+### DEBT-P2-FINALIZE-1:rule-only row
+
+- **現況:**為逐字保留舊 bridge 的非事務語意,finalize 先寫 WatchRule,再寫 sidecar 與 funding intent。若程序在第一個主 DB 寫入後中斷,或後續 funding insert 失敗,會留下沒有 funding row 的 rule-only row;沒有 rollback 或 startup reconciler。
+- **目前處理:**draft 已在網絡讀取與主 DB 寫入前被 consume;失敗後必須重新 propose。新 draft 若碰到相同 `rule_id`,沿用舊 collision/readback 路徑嘗試補上 funding row。
+- **測試缺口:**repository 是具體型別,本切片沒有可注入 funding insert/readback 失敗的 seam,所以實際 rule-only 故障路徑無測試覆蓋;此處只記錄缺口,不為測試而改動核心 crate 邊界。
+- **觸發條件:**`Phase 3 executor 上線前,必須決定 watcher 如何對待 orphan/rule-only rows`。
+- **補測觸發條件:**一旦 bin 取得可注入的 funding repository seam、state-store 新增正式 transaction/recovery API,或最遲進入 Phase 3 executor 合併評審(三者取最早),必須加入 funding insert/readback 故障測試,斷言 rule-only row、draft tombstone 與恢復行為。
+
+### DEBT-P2-FINALIZE-2:funding-only orphan
+
+- **現況:**舊 bridge 在 WatchRule insert 失敗且公開 `get` 也無法確認既有 row 時,仍繼續嘗試寫 funding intent。主 DB 沒有跨 repository transaction/FK,因此可能留下沒有 WatchRule 的 funding-only orphan;本切片為忠實相容而保留此缺陷。
+- **目前處理:**sidecar 只為經公開 repository API 確認的 WatchRule 建立 hash 映射,不替 funding-only orphan 背書,也不把衍生索引冒充主資料。若 funding row 已寫入但 `rule_persisted == false`,新 MCP 回應層 fail closed:回 `status:"rule_unconfirmed"`、`funding_actionable:false`,並完全省略 `funding`/`signing`,避免用戶把資金送進註定無規則可匹配的流程。
+- **測試缺口:**純回應 guard 已有單元測試;但 WatchRule repository 是具體型別,無法注入 insert 加 readback 皆失敗,故實際 funding-only orphan 路徑仍無測試覆蓋。此處只記錄缺口,不改變保留的非交易寫入順序。
+- **觸發條件:**`Phase 3 executor 上線前,必須決定 watcher 如何對待 orphan/rule-only rows`。
+- **補測觸發條件:**一旦 bin 取得可注入的 WatchRule repository seam、state-store 新增正式 transaction/recovery API,或最遲進入 Phase 3 executor 合併評審(三者取最早),必須加入 WatchRule insert/readback 雙失敗測試,同時斷言 orphan row 被保留而回應仍為 `rule_unconfirmed` 且不含入金指引。
+
+### DEBT-P2-FINALIZE-3:DB 與回傳 funding timestamps 不一致
+
+- **現況:**舊 wiring 在 consume draft 並解析 wallet 後、market reads 前擷取回傳用時間,bridge 則在網絡讀取完成後才用另一個 `now` 寫入 funding row。故**新插入**的 DB `created_at_ms`/`expires_at_ms` 可能比 tool 回傳值晚一段網絡延遲;本切片逐字保留這個 fresh-insert 差異。
+- **安全例外:**deterministic `intent_id` collision 走「回既有行」時,不得沿用舊 outer DTO 以本次 request wallet 與新 deadline 拼出 hybrid 指引。MCP bin 會完整核對既有 WatchRule/funding identity;只在同一 funding wallet、仍為 `funding_required` 且既有 deadline 未過期時,回傳主 DB 既有 wallet/ATA/amount/timestamps。wallet、rule shape 或 identity 衝突皆 fail closed 且不給 funding 指引;既有 deadline 已過或 lifecycle 已前進時亦不給可簽指引。
+- **風險:**簽名頁倒數依回傳 deadline 顯示,而 lifecycle/watcher 以主 DB deadline 為準;兩者在邊界附近可能對「已過期」有短暫不同判斷。
+- **觸發條件:**`Phase 3 executor 上線前,必須決定 watcher 如何對待 orphan/rule-only rows`;同次評審必須明定 timestamp 的權威來源與過期邊界。
+
+### DEBT-P2-FINALIZE-4:故障回應測試缺口
+
+- **`sidecar_unavailable` 缺口原因:**這不是技術阻塞;可在衍生 sidecar 路徑預置損毀 SQLite,穩定令 claim 回 `Unavailable`。本次依「記錄、不修」範圍只保留既有 lookup corruption 測試,尚未增加 finalize-level 回應契約測試。
+- **`sidecar_unavailable` 補測觸發條件:**首次修改 `IntentSidecar`/claim-to-response 映射,或最遲在 Phase 2 funding(②-3)分支合併前(兩者取最早),必須補測 `status:"sidecar_unavailable"`、主 DB 零寫入且無 `funding`/`signing`。
+- **`market_data_error` 缺口原因:**這也不是技術阻塞;現有 `MockMarketSource` 已可離線回傳 `FinalizeMarketReadError`,只是本次依「記錄、不修」範圍未增加 finalize-level 回應契約測試。
+- **`market_data_error` 補測觸發條件:**首次修改 consume-before-market 順序、`FinalizeMarketDataSource` 或錯誤分類/回應欄位,或最遲在 Phase 2 funding(②-3)分支合併前(條件取最早),必須補測 error class、`draft_consumed:true`、同 draft 不可重用、主 DB 零寫入且無 `funding`/`signing`。

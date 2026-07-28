@@ -5448,10 +5448,13 @@ dependencies = [
  "solana-account-decoder",
  "solana-client",
  "solana-sdk",
+ "spl-associated-token-account 6.0.0",
+ "sqlx",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

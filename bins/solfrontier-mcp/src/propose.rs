@@ -6,9 +6,12 @@
 //! originated at commit `3d30617d1c13231b05e6dd5b072f471b1979eeee`.
 //!
 //! The predecessor's audit/session-only `DraftIntent` fields are deliberately
-//! cropped: `draft_id`, `parser_source`, `warnings`, `review_copy`,
-//! `created_at_ms`, and `session_id_hex`. Its in-memory `DraftIntentStore` is
-//! also omitted: this MCP slice keeps no state at all. The raw user message is
+//! cropped: `parser_source`, `warnings`, `review_copy`, `created_at_ms`, and
+//! `session_id_hex`. Its in-memory `DraftIntentStore` is also omitted:
+//! proposing keeps no state at all. A fresh random `draft_id` is returned only
+//! as a non-canonical retry/idempotency handle for `finalize_intent`; it is
+//! never persisted by this tool and MUST NOT enter either the frozen draft
+//! hash preimage or the later canonical rule hash. The raw user message is
 //! accepted only long enough to compute `original_user_message_hash`; it is
 //! never returned or persisted.
 //!
@@ -24,11 +27,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use solana_sdk::{hash::hash as sha256, pubkey::Pubkey};
+use uuid::Uuid;
 
 pub(crate) const MIN_AMOUNT_RAW: u64 = 100_000;
 pub(crate) const MAX_AMOUNT_RAW: u64 = 1_000_000;
 pub(crate) const EXPIRY_SECONDS_AFTER_FINALIZE: u64 = 180;
 pub(crate) const MAX_THRESHOLD_BPS: u32 = 10_000;
+pub(crate) const CONTROLLED_WALLET_BS58: &str = "BPfDMmeMBmCbMC1rWh7hwigMBoKGBrKwXxSeUu9hhs5L";
+pub(crate) const CONTROLLED_USDC_ATA_BS58: &str = "7LFdKcSV7JQYi3or5y9phHVPjhGigu5DDjUakAFbBmk3";
 
 const USDC_DECIMALS: u32 = 6;
 const USDC_RAW_PER_WHOLE: u64 = 1_000_000;
@@ -153,7 +159,7 @@ pub(crate) struct DraftIntent {
 }
 
 impl DraftIntent {
-    fn canonical_preimage(&self) -> CanonicalDraftPreimage {
+    pub(crate) fn canonical_preimage(&self) -> CanonicalDraftPreimage {
         CanonicalDraftPreimage {
             action: self.action.to_owned(),
             amount_raw: self.amount_raw.to_string(),
@@ -219,8 +225,12 @@ pub(crate) enum ProposeIntentError {
     UnsupportedExpiry,
     #[error("controlled_wallet must be a valid Solana public key")]
     InvalidControlledWallet,
+    #[error("controlled_wallet must equal the pinned bounded executor wallet")]
+    UnsupportedControlledWallet,
     #[error("controlled_usdc_ata must be a valid Solana public key")]
     InvalidControlledUsdcAta,
+    #[error("controlled_usdc_ata must equal the pinned bounded executor USDC ATA")]
+    UnsupportedControlledUsdcAta,
     #[error("original_user_message must not be empty")]
     EmptyOriginalUserMessage,
 }
@@ -233,18 +243,23 @@ impl ProposeIntentError {
             Self::ThresholdOutOfRange => "threshold_bps_out_of_range",
             Self::UnsupportedExpiry => "expiry_unsupported",
             Self::InvalidControlledWallet => "controlled_wallet_invalid",
+            Self::UnsupportedControlledWallet => "controlled_wallet_unsupported",
             Self::InvalidControlledUsdcAta => "controlled_usdc_ata_invalid",
+            Self::UnsupportedControlledUsdcAta => "controlled_usdc_ata_unsupported",
             Self::EmptyOriginalUserMessage => "original_user_message_empty",
         }
     }
 }
 
 pub(crate) fn propose_intent_json(params: &ProposeIntentParams) -> Value {
-    match validate_draft(params) {
-        Ok(draft) => {
-            let draft_hash = compute_draft_hash(&draft.canonical_preimage());
+    match validate_and_hash_draft(params) {
+        Ok((draft, draft_hash)) => {
+            // Random/non-canonical by contract. It is deliberately generated
+            // after hashing and is absent from both canonical preimages.
+            let draft_id = Uuid::new_v4().simple().to_string();
             json!({
                 "status": "ok",
+                "draft_id": draft_id,
                 "draft_hash": draft_hash,
                 "draft": draft,
                 "persistence": {
@@ -270,7 +285,17 @@ pub(crate) fn propose_intent_json(params: &ProposeIntentParams) -> Value {
     }
 }
 
-fn validate_draft(params: &ProposeIntentParams) -> Result<DraftIntent, ProposeIntentError> {
+pub(crate) fn validate_and_hash_draft(
+    params: &ProposeIntentParams,
+) -> Result<(DraftIntent, String), ProposeIntentError> {
+    let draft = validate_draft(params)?;
+    let draft_hash = compute_draft_hash(&draft.canonical_preimage());
+    Ok((draft, draft_hash))
+}
+
+pub(crate) fn validate_draft(
+    params: &ProposeIntentParams,
+) -> Result<DraftIntent, ProposeIntentError> {
     let amount_raw = parse_usdc_amount_to_raw(&params.amount)?;
     if !(MIN_AMOUNT_RAW..=MAX_AMOUNT_RAW).contains(&amount_raw) {
         return Err(ProposeIntentError::AmountOutOfRange);
@@ -283,8 +308,14 @@ fn validate_draft(params: &ProposeIntentParams) -> Result<DraftIntent, ProposeIn
     }
     Pubkey::from_str(&params.controlled_wallet)
         .map_err(|_| ProposeIntentError::InvalidControlledWallet)?;
+    if params.controlled_wallet != CONTROLLED_WALLET_BS58 {
+        return Err(ProposeIntentError::UnsupportedControlledWallet);
+    }
     Pubkey::from_str(&params.controlled_usdc_ata)
         .map_err(|_| ProposeIntentError::InvalidControlledUsdcAta)?;
+    if params.controlled_usdc_ata != CONTROLLED_USDC_ATA_BS58 {
+        return Err(ProposeIntentError::UnsupportedControlledUsdcAta);
+    }
     if params.original_user_message.trim().is_empty() {
         return Err(ProposeIntentError::EmptyOriginalUserMessage);
     }
@@ -503,6 +534,16 @@ pub(crate) mod tests {
 
         assert_eq!(first["status"], "ok");
         assert_eq!(first["draft_hash"], second["draft_hash"]);
+        assert_ne!(
+            first["draft_id"], second["draft_id"],
+            "draft_id is random and intentionally non-canonical"
+        );
+        for response in [&first, &second] {
+            let draft_id = response["draft_id"].as_str().expect("draft id");
+            let parsed = Uuid::parse_str(draft_id).expect("draft id UUID");
+            assert_eq!(draft_id.len(), 32);
+            assert_eq!(parsed.get_version(), Some(uuid::Version::Random));
+        }
         assert_eq!(first["draft_hash"].as_str().expect("draft hash").len(), 64);
         assert_eq!(first["draft"]["amount_raw"], 500_000);
         assert_eq!(
@@ -579,6 +620,27 @@ pub(crate) mod tests {
             );
             assert_eq!(response["error_code"], "expiry_unsupported");
         }
+    }
+
+    #[test]
+    fn controlled_wallet_topology_is_pinned_before_hashing() {
+        let mut wrong_wallet = valid_params();
+        wrong_wallet.controlled_wallet = Pubkey::new_unique().to_string();
+        let wallet_response = propose_intent_json(&wrong_wallet);
+        assert_eq!(wallet_response["status"], "invalid_input");
+        assert_eq!(
+            wallet_response["error_code"],
+            "controlled_wallet_unsupported"
+        );
+
+        let mut wrong_ata = valid_params();
+        wrong_ata.controlled_usdc_ata = Pubkey::new_unique().to_string();
+        let ata_response = propose_intent_json(&wrong_ata);
+        assert_eq!(ata_response["status"], "invalid_input");
+        assert_eq!(
+            ata_response["error_code"],
+            "controlled_usdc_ata_unsupported"
+        );
     }
 
     #[test]
