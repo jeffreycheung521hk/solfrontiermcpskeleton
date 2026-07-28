@@ -14,6 +14,7 @@
 #[cfg(test)]
 mod dev_seed;
 mod position;
+mod quote;
 mod solend_raw;
 mod status;
 
@@ -31,6 +32,7 @@ use rmcp::{
 use std::path::PathBuf;
 
 use crate::position::{configured_reader_from_env, query_position, RpcSolendPositionReader};
+use crate::quote::{configured_client_from_env, query_quote, HttpJupiterClient};
 use crate::status::query_intent_status;
 
 // ── Tool parameter types (schemars 1.x → JSON Schema, host 端自動看到) ──
@@ -43,6 +45,8 @@ struct GetQuoteParams {
     output_mint: String,
     /// Amount in base units (u64 as string to avoid JS precision loss)
     amount: String,
+    /// Maximum slippage in basis points. Values above 100 are policy-blocked.
+    slippage_bps: u64,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -64,32 +68,40 @@ struct SolFrontierServer {
     funding_intents: Stage2W5hFundingIntentRepository,
     watch_rules: Stage2WatchRuleRepository,
     position_reader: Option<RpcSolendPositionReader>,
+    quote_source: HttpJupiterClient,
 }
 
 #[tool_router]
 impl SolFrontierServer {
-    fn new(db: &Database, position_reader: Option<RpcSolendPositionReader>) -> Self {
+    fn new(
+        db: &Database,
+        position_reader: Option<RpcSolendPositionReader>,
+        quote_source: HttpJupiterClient,
+    ) -> Self {
         Self {
             funding_intents: Stage2W5hFundingIntentRepository::new(db.pool().clone()),
             watch_rules: Stage2WatchRuleRepository::new(db.pool().clone()),
             position_reader,
+            quote_source,
         }
     }
 
     /// READ-ONLY. Jupiter quote preview — no transaction is built or signed.
-    #[tool(description = "Get a Jupiter swap quote (read-only preview, no transaction)")]
+    #[tool(
+        description = "Get a SOL/USDC Jupiter quote (read-only preview, max 100 bps slippage, no transaction)"
+    )]
     async fn get_quote(
         &self,
         Parameters(p): Parameters<GetQuoteParams>,
     ) -> Result<CallToolResult, McpError> {
-        // TODO(Phase1): port logic from 舊 repo crates/gateway/src/tools/get_jupiter_quote.rs
-        // 純 builder:給定 mints+amount → 呼叫 Jupiter quote API → 回傳 JSON 摘要。
-        let body = serde_json::json!({
-            "status": "stub",
-            "input_mint": p.input_mint,
-            "output_mint": p.output_mint,
-            "amount": p.amount,
-        });
+        let body = query_quote(
+            &self.quote_source,
+            &p.input_mint,
+            &p.output_mint,
+            &p.amount,
+            p.slippage_bps,
+        )
+        .await;
         Ok(CallToolResult::success(vec![Content::text(
             body.to_string(),
         )]))
@@ -172,12 +184,13 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("solfrontier-mcp starting (stdio, Phase 1 read-only)");
     let position_reader = configured_reader_from_env();
+    let quote_source = configured_client_from_env();
     let db = Database::open(&DatabaseConfig {
         path: cli.db.to_string_lossy().into_owned(),
         ..DatabaseConfig::default()
     })
     .await?;
-    let service = SolFrontierServer::new(&db, position_reader)
+    let service = SolFrontierServer::new(&db, position_reader, quote_source)
         .serve(stdio())
         .await?;
     service.waiting().await?;

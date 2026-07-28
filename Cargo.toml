@@ -35,6 +35,9 @@ serde_json   = { version = "1" }
 schemars     = { version = "0.8", features = ["uuid1"] }
 toml         = { version = "0.8" }
 
+# HTTP (exactly aligned with solana-rpc-client's existing reqwest version)
+reqwest = { version = "=0.11.27", default-features = false, features = ["json", "rustls-tls"] }
+
 # error handling
 anyhow       = { version = "1" }
 thiserror    = { version = "1" }
