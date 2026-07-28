@@ -83,7 +83,7 @@ Phase 2 第一切片 `propose_intent` 已完成;第二切片加入明確標示�
 - **現況:**舊 wiring 在 consume draft 並解析 wallet 後、market reads 前擷取回傳用時間,bridge 則在網絡讀取完成後才用另一個 `now` 寫入 funding row。故**新插入**的 DB `created_at_ms`/`expires_at_ms` 可能比 tool 回傳值晚一段網絡延遲;本切片逐字保留這個 fresh-insert 差異。
 - **安全例外:**deterministic `intent_id` collision 走「回既有行」時,不得沿用舊 outer DTO 以本次 request wallet 與新 deadline 拼出 hybrid 指引。MCP bin 會完整核對既有 WatchRule/funding identity;只在同一 funding wallet、仍為 `funding_required` 且既有 deadline 未過期時,回傳主 DB 既有 wallet/ATA/amount/timestamps。wallet、rule shape 或 identity 衝突皆 fail closed 且不給 funding 指引;既有 deadline 已過或 lifecycle 已前進時亦不給可簽指引。
 - **風險:**簽名頁倒數依回傳 deadline 顯示,而 lifecycle/watcher 以主 DB deadline 為準;兩者在邊界附近可能對「已過期」有短暫不同判斷。
-- **觸發條件:**`Phase 3 executor 上線前,必須決定 watcher 如何對待 orphan/rule-only rows`;同次評審必須明定 timestamp 的權威來源與過期邊界。
+- **觸發條件:**Phase 3 executor 合併評審前,必須明定 DB timestamps 與 tool 回傳 timestamps 的唯一權威來源及過期邊界,並讓 signing page、watcher/lifecycle 使用同一套判定;未完成不得關閉本債。
 
 ### DEBT-P2-FINALIZE-4:故障回應測試缺口
 
