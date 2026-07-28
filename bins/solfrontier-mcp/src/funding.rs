@@ -1034,7 +1034,7 @@ fn success_response(
         } else {
             (now_ms, "confirmation_clock_fallback")
         };
-    let arrived_after_funding_deadline = funding_arrival_time_ms > intent.expires_at_ms;
+    let arrived_after_funding_deadline = funding_arrival_time_ms >= intent.expires_at_ms;
     let watch_rule_expired_at_funding_slot =
         observed_slot.is_some_and(|slot| slot >= stored_rule.rule.expires_at_slot);
     let mut response = json!({

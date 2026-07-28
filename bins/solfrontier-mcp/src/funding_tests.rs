@@ -347,6 +347,28 @@ async fn expired_funding_is_reserved_but_explicitly_requires_manual_refund() {
 }
 
 #[tokio::test]
+async fn funding_at_exact_deadline_is_late_and_requires_manual_refund() {
+    let store = test_store().await;
+    let mut tx = valid_observation(&store);
+    tx.block_time_ms = Some(EXPIRES_AT_MS);
+
+    let response = confirm(&store, &MockReader::confirmed(tx), EXPIRES_AT_MS).await;
+
+    assert_eq!(response["status"], "budget_reserved");
+    assert_eq!(response["funding_arrival_time_ms"], EXPIRES_AT_MS);
+    assert_eq!(response["arrived_after_funding_deadline"], true);
+    assert_eq!(response["late_funding"]["refundable"], true);
+    assert_eq!(response["late_funding"]["manual_refund_required"], true);
+    let current = store
+        .funding
+        .get(&store.params.intent_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.status, W5hIntentStatus::BudgetReserved);
+}
+
+#[tokio::test]
 async fn valid_proof_advances_both_cas_transitions() {
     let store = test_store().await;
     let tx = valid_observation(&store);
