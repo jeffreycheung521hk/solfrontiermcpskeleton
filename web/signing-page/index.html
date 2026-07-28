@@ -1,0 +1,1108 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'unsafe-inline'; connect-src https://api.mainnet-beta.solana.com; img-src data:; base-uri 'none'; form-action 'none'"
+  >
+  <title>SolFrontier 入金簽名</title>
+  <!--
+    Static signing handoff only: no project backend and no build step.
+    Serve this directory on loopback; never open with file://.
+
+    Provenance:
+    - bridge/index.html @ 07341bfe388c673bf91ae7a432aa0bfc0596df39
+    - frontend/src/lib/stage2-funding.ts (Memo-first funding transaction)
+
+    The finalize response is authoritative. In particular, this page uses
+    funding.memo verbatim and funding.expires_at_ms as an absolute deadline.
+  -->
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07110f;
+      --panel: rgba(15, 35, 30, 0.88);
+      --panel-strong: #102a23;
+      --line: #2b5146;
+      --text: #eef8f4;
+      --muted: #a9c3ba;
+      --accent: #7ff2c5;
+      --accent-ink: #052219;
+      --danger: #ff8e8e;
+      --danger-bg: rgba(114, 27, 32, 0.42);
+      --warn: #ffd27b;
+      --warn-bg: rgba(100, 67, 11, 0.42);
+      --ok: #91f5bd;
+      --ok-bg: rgba(17, 92, 54, 0.36);
+      font-family:
+        Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      background:
+        radial-gradient(circle at 12% 8%, rgba(58, 180, 136, 0.22), transparent 34rem),
+        radial-gradient(circle at 88% 92%, rgba(58, 121, 180, 0.18), transparent 32rem),
+        var(--bg);
+      color: var(--text);
+    }
+
+    main {
+      width: min(880px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 48px 0 64px;
+    }
+
+    header {
+      margin-bottom: 28px;
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--accent);
+      font-size: 0.78rem;
+      font-weight: 750;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(2rem, 6vw, 3.25rem);
+      letter-spacing: -0.045em;
+      line-height: 1;
+    }
+
+    .subtitle {
+      max-width: 680px;
+      margin: 16px 0 0;
+      color: var(--muted);
+      line-height: 1.65;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--panel);
+      box-shadow: 0 22px 70px rgba(0, 0, 0, 0.28);
+      backdrop-filter: blur(12px);
+      overflow: hidden;
+    }
+
+    .panel-section {
+      padding: 24px;
+    }
+
+    .panel-section + .panel-section {
+      border-top: 1px solid var(--line);
+    }
+
+    h2 {
+      margin: 0 0 16px;
+      font-size: 1.05rem;
+      letter-spacing: -0.015em;
+    }
+
+    .alert {
+      display: none;
+      margin: 0 0 20px;
+      padding: 14px 16px;
+      border: 1px solid;
+      border-radius: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+
+    .alert.visible {
+      display: block;
+    }
+
+    .alert.error {
+      border-color: rgba(255, 142, 142, 0.55);
+      background: var(--danger-bg);
+      color: #ffd7d7;
+    }
+
+    .alert.warning {
+      border-color: rgba(255, 210, 123, 0.52);
+      background: var(--warn-bg);
+      color: #ffe8ba;
+    }
+
+    .alert.success {
+      border-color: rgba(145, 245, 189, 0.52);
+      background: var(--ok-bg);
+      color: #d4ffe5;
+    }
+
+    dl {
+      display: grid;
+      grid-template-columns: minmax(145px, 0.32fr) minmax(0, 1fr);
+      gap: 0;
+      margin: 0;
+    }
+
+    dt,
+    dd {
+      margin: 0;
+      padding: 13px 0;
+      border-bottom: 1px solid rgba(43, 81, 70, 0.62);
+    }
+
+    dt {
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    dd {
+      min-width: 0;
+      font-weight: 650;
+    }
+
+    dt:last-of-type,
+    dd:last-of-type {
+      border-bottom: 0;
+    }
+
+    code,
+    .mono {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    .value {
+      overflow-wrap: anywhere;
+    }
+
+    .memo {
+      display: block;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(2, 13, 10, 0.5);
+      color: #d7f9ed;
+      font-size: 0.82rem;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .timer {
+      color: var(--accent);
+      font-variant-numeric: tabular-nums;
+      font-size: 1.2rem;
+    }
+
+    .timer.expired {
+      color: var(--danger);
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+    }
+
+    button {
+      min-height: 44px;
+      padding: 0 18px;
+      border: 1px solid transparent;
+      border-radius: 999px;
+      background: var(--accent);
+      color: var(--accent-ink);
+      cursor: pointer;
+      font: inherit;
+      font-weight: 780;
+      transition:
+        transform 120ms ease,
+        opacity 120ms ease,
+        background 120ms ease;
+    }
+
+    button:hover:not(:disabled) {
+      transform: translateY(-1px);
+    }
+
+    button:focus-visible {
+      outline: 3px solid rgba(127, 242, 197, 0.32);
+      outline-offset: 3px;
+    }
+
+    button.secondary {
+      border-color: var(--line);
+      background: transparent;
+      color: var(--text);
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.42;
+    }
+
+    .status-line {
+      min-height: 24px;
+      margin: 16px 0 0;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .signature-box {
+      display: none;
+      margin-top: 18px;
+      padding: 16px;
+      border: 1px solid rgba(145, 245, 189, 0.5);
+      border-radius: 12px;
+      background: var(--ok-bg);
+    }
+
+    .signature-box.visible {
+      display: block;
+    }
+
+    .signature-box p {
+      margin: 0 0 10px;
+      color: #d4ffe5;
+    }
+
+    .signature-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .signature-row code {
+      min-width: 0;
+      flex: 1;
+      overflow-wrap: anywhere;
+      color: #e9fff2;
+    }
+
+    .fine-print {
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: 0.82rem;
+      line-height: 1.55;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    @media (max-width: 620px) {
+      main {
+        width: min(100% - 20px, 880px);
+        padding-top: 28px;
+      }
+
+      .panel-section {
+        padding: 20px;
+      }
+
+      dl {
+        display: block;
+      }
+
+      dt {
+        padding-bottom: 4px;
+        border-bottom: 0;
+      }
+
+      dd {
+        padding-top: 0;
+      }
+
+      .actions,
+      .signature-row {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      button {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">SolFrontier · Local signing handoff</p>
+      <h1>核對，再由 Phantom 簽名</h1>
+      <p class="subtitle">
+        此頁只在你的瀏覽器中組裝一筆 Memo + USDC TransferChecked
+        交易。它不連接 SolFrontier 後端、不保存資料，也不代你簽名。
+      </p>
+    </header>
+
+    <section class="panel" aria-labelledby="review-title">
+      <div class="panel-section">
+        <div id="page-alert" class="alert" role="alert" aria-live="assertive"></div>
+
+        <h2 id="review-title">入金核對卡</h2>
+        <dl id="review-card" class="hidden">
+          <dt>金額</dt>
+          <dd id="amount" class="value"></dd>
+
+          <dt>Intent ID</dt>
+          <dd id="intent-id" class="value mono"></dd>
+
+          <dt>Rule hash</dt>
+          <dd id="rule-hash" class="value mono"></dd>
+
+          <dt>出資錢包</dt>
+          <dd id="user-wallet" class="value mono"></dd>
+
+          <dt>來源 USDC ATA</dt>
+          <dd id="source-ata" class="value mono"></dd>
+
+          <dt>收款 controlled ATA</dt>
+          <dd id="destination-ata" class="value mono"></dd>
+
+          <dt>Mint / decimals</dt>
+          <dd id="mint-decimals" class="value mono"></dd>
+
+          <dt>Memo 全文（原樣）</dt>
+          <dd><code id="memo" class="memo"></code></dd>
+
+          <dt>指令順序</dt>
+          <dd id="instruction-order" class="value mono"></dd>
+
+          <dt>剩餘時間</dt>
+          <dd>
+            <span id="countdown" class="timer">--:--</span>
+            <span id="expiry-at" class="value"></span>
+          </dd>
+        </dl>
+      </div>
+
+      <div id="wallet-section" class="panel-section hidden">
+        <h2>Phantom 簽名</h2>
+        <div class="actions">
+          <button id="connect-button" type="button">連接 Phantom</button>
+          <button id="sign-button" type="button" disabled>簽名並送出入金</button>
+          <button id="retry-button" class="secondary hidden" type="button">
+            手動重試
+          </button>
+        </div>
+        <p id="wallet-status" class="status-line" aria-live="polite">
+          尚未連接錢包。
+        </p>
+
+        <div id="signature-box" class="signature-box" aria-live="polite">
+          <p>交易已由 Phantom 送出。請複製 signature 並交給 confirm_funding：</p>
+          <div class="signature-row">
+            <code id="signature"></code>
+            <button id="copy-button" class="secondary" type="button">複製</button>
+          </div>
+        </div>
+
+        <p class="fine-print">
+          Blockhash 只向無密鑰的 Solana 公共 mainnet RPC 取得。公共節點可能限流；
+          失敗時本頁不會自動重試，避免在背景耗掉入金倒數。
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@solana/web3.js@1.98.4/lib/index.iife.min.js"></script>
+  <script>
+    "use strict";
+
+    (() => {
+      const PUBLIC_RPC_URL = "https://api.mainnet-beta.solana.com";
+      const TOKEN_PROGRAM_ID_TEXT = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+      const ASSOCIATED_TOKEN_PROGRAM_ID_TEXT =
+        "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+      const MEMO_PROGRAM_ID_TEXT =
+        "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
+      const USDC_MINT_TEXT =
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+      const MAX_U64 = 18446744073709551615n;
+      const EXPECTED_ORDER = ["memo", "transfer_checked"];
+
+      const elements = {
+        alert: document.getElementById("page-alert"),
+        reviewCard: document.getElementById("review-card"),
+        walletSection: document.getElementById("wallet-section"),
+        amount: document.getElementById("amount"),
+        intentId: document.getElementById("intent-id"),
+        ruleHash: document.getElementById("rule-hash"),
+        userWallet: document.getElementById("user-wallet"),
+        sourceAta: document.getElementById("source-ata"),
+        destinationAta: document.getElementById("destination-ata"),
+        mintDecimals: document.getElementById("mint-decimals"),
+        memo: document.getElementById("memo"),
+        instructionOrder: document.getElementById("instruction-order"),
+        countdown: document.getElementById("countdown"),
+        expiryAt: document.getElementById("expiry-at"),
+        connectButton: document.getElementById("connect-button"),
+        signButton: document.getElementById("sign-button"),
+        retryButton: document.getElementById("retry-button"),
+        walletStatus: document.getElementById("wallet-status"),
+        signatureBox: document.getElementById("signature-box"),
+        signature: document.getElementById("signature"),
+        copyButton: document.getElementById("copy-button"),
+      };
+
+      const state = {
+        payload: null,
+        funding: null,
+        parsed: null,
+        provider: null,
+        connectedWallet: null,
+        expired: true,
+        busy: false,
+        ready: false,
+        lastFailureCanRetry: false,
+      };
+
+      function showAlert(kind, message) {
+        elements.alert.className = `alert visible ${kind}`;
+        elements.alert.textContent = message;
+      }
+
+      function clearAlert() {
+        elements.alert.className = "alert";
+        elements.alert.textContent = "";
+      }
+
+      function readFinalizePayload() {
+        const rawFragment = window.location.hash.slice(1);
+        if (!rawFragment) {
+          throw new Error("fragment_missing");
+        }
+        if (rawFragment.length > 131072) {
+          throw new Error("fragment_too_large");
+        }
+
+        const params = new URLSearchParams(rawFragment);
+        const keys = [...params.keys()];
+        if (
+          keys.length !== 1 ||
+          keys[0] !== "payload" ||
+          params.getAll("payload").length !== 1
+        ) {
+          throw new Error("fragment_payload_invalid");
+        }
+        let parsed;
+        try {
+          parsed = JSON.parse(params.get("payload"));
+        } catch (_) {
+          throw new Error("fragment_payload_invalid");
+        }
+
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error("fragment_payload_invalid");
+        }
+        return parsed;
+      }
+
+      function requireString(value, field) {
+        if (typeof value !== "string" || value.length === 0) {
+          throw new Error(`invalid_${field}`);
+        }
+        return value;
+      }
+
+      function requirePublicKey(value, field) {
+        const text = requireString(value, field);
+        try {
+          return new window.solanaWeb3.PublicKey(text);
+        } catch (_) {
+          throw new Error(`invalid_${field}`);
+        }
+      }
+
+      function requireSafeEpochMs(value) {
+        if (
+          typeof value !== "number" ||
+          !Number.isSafeInteger(value) ||
+          value <= 0
+        ) {
+          throw new Error("invalid_expires_at_ms");
+        }
+        return value;
+      }
+
+      function parseAmountRaw(value) {
+        if (typeof value !== "string" || !/^[0-9]+$/.test(value)) {
+          throw new Error("invalid_amount_raw");
+        }
+        const amount = BigInt(value);
+        if (amount <= 0n || amount > MAX_U64) {
+          throw new Error("invalid_amount_raw");
+        }
+        return amount;
+      }
+
+      function requireDecimals(value) {
+        if (!Number.isInteger(value) || value < 0 || value > 255) {
+          throw new Error("invalid_decimals");
+        }
+        return value;
+      }
+
+      function deriveAta(owner, mint, tokenProgramId, associatedProgramId) {
+        return window.solanaWeb3.PublicKey.findProgramAddressSync(
+          [owner.toBuffer(), tokenProgramId.toBuffer(), mint.toBuffer()],
+          associatedProgramId,
+        )[0];
+      }
+
+      function validateFundingPayload(payload) {
+        if (payload.status === "rule_unconfirmed") {
+          throw new Error("rule_unconfirmed");
+        }
+        if (payload.status !== "funding_required") {
+          throw new Error("invalid_funding_status");
+        }
+        if (payload.funding_actionable !== true) {
+          throw new Error("funding_not_actionable");
+        }
+        if (
+          payload.signing &&
+          (payload.signing.required === false ||
+            payload.signing.performed_by_server === true)
+        ) {
+          throw new Error("signing_not_actionable");
+        }
+        if (
+          !payload.funding ||
+          typeof payload.funding !== "object" ||
+          Array.isArray(payload.funding)
+        ) {
+          throw new Error("funding_missing");
+        }
+
+        const funding = payload.funding;
+        const intentId = requireString(payload.intent_id, "intent_id");
+        const ruleHash = requireString(payload.rule_hash, "rule_hash");
+        if (!/^[0-9a-f]{32}$/.test(intentId) || !/^[0-9a-f]{64}$/.test(ruleHash)) {
+          throw new Error("invalid_canonical_identity");
+        }
+        const order = funding.instruction_order;
+        if (
+          !Array.isArray(order) ||
+          order.length !== EXPECTED_ORDER.length ||
+          !order.every((item, index) => item === EXPECTED_ORDER[index])
+        ) {
+          throw new Error("invalid_instruction_order");
+        }
+
+        const tokenProgramId = new window.solanaWeb3.PublicKey(
+          TOKEN_PROGRAM_ID_TEXT,
+        );
+        const associatedProgramId = new window.solanaWeb3.PublicKey(
+          ASSOCIATED_TOKEN_PROGRAM_ID_TEXT,
+        );
+        const userWallet = requirePublicKey(funding.user_wallet, "user_wallet");
+        const userAta = requirePublicKey(funding.user_usdc_ata, "user_usdc_ata");
+        const controlledWallet = requirePublicKey(
+          funding.controlled_wallet,
+          "controlled_wallet",
+        );
+        const controlledAta = requirePublicKey(
+          funding.controlled_usdc_ata,
+          "controlled_usdc_ata",
+        );
+        const mint = requirePublicKey(funding.mint, "mint");
+        if (mint.toBase58() !== USDC_MINT_TEXT) {
+          throw new Error("unsupported_mint");
+        }
+
+        const memoProgramId = requirePublicKey(
+          funding.memo_program_id,
+          "memo_program_id",
+        );
+        if (memoProgramId.toBase58() !== MEMO_PROGRAM_ID_TEXT) {
+          throw new Error("unsupported_memo_program");
+        }
+
+        if (
+          !deriveAta(userWallet, mint, tokenProgramId, associatedProgramId).equals(
+            userAta,
+          )
+        ) {
+          throw new Error("user_ata_mismatch");
+        }
+        if (
+          !deriveAta(
+            controlledWallet,
+            mint,
+            tokenProgramId,
+            associatedProgramId,
+          ).equals(controlledAta)
+        ) {
+          throw new Error("controlled_ata_mismatch");
+        }
+
+        const expiresAtMs = requireSafeEpochMs(
+          funding.expires_at_ms ?? payload.expires_at_ms,
+        );
+        const memo = requireString(funding.memo, "memo");
+        const amount = parseAmountRaw(funding.amount_raw);
+        const decimals = requireDecimals(funding.decimals);
+
+        return {
+          intentId,
+          ruleHash,
+          userWallet,
+          userAta,
+          controlledWallet,
+          controlledAta,
+          mint,
+          memoProgramId,
+          tokenProgramId,
+          amount,
+          decimals,
+          expiresAtMs,
+          memo,
+          instructionOrder: order.slice(),
+        };
+      }
+
+      function formatAmount(amount, decimals) {
+        if (decimals === 0) {
+          return `${amount.toString()} USDC (${amount.toString()} raw)`;
+        }
+        const scale = 10n ** BigInt(decimals);
+        const whole = amount / scale;
+        const fraction = (amount % scale).toString().padStart(decimals, "0");
+        return `${whole.toString()}.${fraction} USDC (${amount.toString()} raw)`;
+      }
+
+      function renderReview() {
+        const parsed = state.parsed;
+        elements.amount.textContent = formatAmount(parsed.amount, parsed.decimals);
+        elements.intentId.textContent = parsed.intentId;
+        elements.ruleHash.textContent = parsed.ruleHash;
+        elements.userWallet.textContent = parsed.userWallet.toBase58();
+        elements.sourceAta.textContent = parsed.userAta.toBase58();
+        elements.destinationAta.textContent = parsed.controlledAta.toBase58();
+        elements.mintDecimals.textContent =
+          `${parsed.mint.toBase58()} / ${parsed.decimals}`;
+        elements.memo.textContent = parsed.memo;
+        elements.instructionOrder.textContent =
+          parsed.instructionOrder.map((item, index) => `${index}: ${item}`).join(" → ");
+        elements.expiryAt.textContent =
+          `（期限 ${new Date(parsed.expiresAtMs).toLocaleString()}）`;
+        elements.reviewCard.classList.remove("hidden");
+        elements.walletSection.classList.remove("hidden");
+      }
+
+      function formatRemaining(remainingMs) {
+        const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+      }
+
+      function isExpectedWalletConnected() {
+        return (
+          state.connectedWallet !== null &&
+          state.parsed !== null &&
+          state.connectedWallet === state.parsed.userWallet.toBase58()
+        );
+      }
+
+      function updateButtons() {
+        const canSign =
+          state.ready &&
+          !state.busy &&
+          !state.expired &&
+          state.payload?.funding_actionable === true &&
+          state.payload?.status !== "rule_unconfirmed" &&
+          isExpectedWalletConnected();
+        elements.signButton.disabled = !canSign;
+        elements.connectButton.disabled = state.busy || state.expired || !state.ready;
+        elements.retryButton.disabled = !canSign;
+        elements.retryButton.classList.toggle(
+          "hidden",
+          !state.lastFailureCanRetry,
+        );
+      }
+
+      function updateCountdown() {
+        if (!state.parsed) {
+          return;
+        }
+        const remaining = state.parsed.expiresAtMs - Date.now();
+        state.expired = remaining <= 0;
+        elements.countdown.textContent = formatRemaining(remaining);
+        elements.countdown.classList.toggle("expired", state.expired);
+
+        if (state.expired) {
+          showAlert(
+            "error",
+            "入金期限已過。請勿簽名或送出交易；請回到 MCP 重新 propose → finalize。",
+          );
+          elements.walletStatus.textContent =
+            "期限已過，簽名已停用。逾時入金可能被擱置並需人工取回。";
+          state.lastFailureCanRetry = false;
+        }
+        updateButtons();
+      }
+
+      function currentPhantomProvider() {
+        const provider = window.phantom?.solana ?? window.solana;
+        if (!provider || provider.isPhantom !== true) {
+          return null;
+        }
+        return provider;
+      }
+
+      function setWalletStatus(message) {
+        elements.walletStatus.textContent = message;
+      }
+
+      async function connectPhantom() {
+        if (!state.ready || state.expired || state.busy) {
+          return;
+        }
+        const provider = currentPhantomProvider();
+        if (!provider) {
+          showAlert(
+            "error",
+            "找不到 Phantom。請在安裝 Phantom 的桌面瀏覽器中，透過 127.0.0.1 開啟此頁。",
+          );
+          return;
+        }
+
+        state.busy = true;
+        updateButtons();
+        setWalletStatus("等待 Phantom 授權連接…");
+        try {
+          const result = await provider.connect();
+          const wallet = result.publicKey.toBase58();
+          state.provider = provider;
+          state.connectedWallet = wallet;
+          if (wallet !== state.parsed.userWallet.toBase58()) {
+            showAlert(
+              "error",
+              `錢包不符，已阻擋簽名。\n已連接：${wallet}\nfinalize 登記：${state.parsed.userWallet.toBase58()}`,
+            );
+            setWalletStatus("請在 Phantom 切換到 finalize 時登記的出資錢包。");
+          } else {
+            clearAlert();
+            setWalletStatus(`已核對出資錢包：${wallet}`);
+          }
+        } catch (_) {
+          showAlert("error", "Phantom 連接未完成。請確認授權後手動重試。");
+          setWalletStatus("尚未連接錢包。");
+        } finally {
+          state.busy = false;
+          updateCountdown();
+        }
+      }
+
+      function u64LittleEndian(value) {
+        const bytes = new Uint8Array(8);
+        let remaining = value;
+        for (let index = 0; index < bytes.length; index += 1) {
+          bytes[index] = Number(remaining & 0xffn);
+          remaining >>= 8n;
+        }
+        return bytes;
+      }
+
+      function memoInstruction() {
+        return new window.solanaWeb3.TransactionInstruction({
+          programId: state.parsed.memoProgramId,
+          keys: [],
+          // Do not reconstruct, normalize, or trim this string.
+          data: new TextEncoder().encode(state.parsed.memo),
+        });
+      }
+
+      function transferCheckedInstruction() {
+        const data = new Uint8Array(10);
+        data[0] = 12;
+        data.set(u64LittleEndian(state.parsed.amount), 1);
+        // This byte comes from finalize; it is deliberately not hard-coded.
+        data[9] = state.parsed.decimals;
+        return new window.solanaWeb3.TransactionInstruction({
+          programId: state.parsed.tokenProgramId,
+          keys: [
+            {
+              pubkey: state.parsed.userAta,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: state.parsed.mint,
+              isSigner: false,
+              isWritable: false,
+            },
+            {
+              pubkey: state.parsed.controlledAta,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: state.parsed.userWallet,
+              isSigner: true,
+              isWritable: false,
+            },
+          ],
+          data,
+        });
+      }
+
+      function buildTransaction(blockhash) {
+        const builders = {
+          memo: memoInstruction,
+          transfer_checked: transferCheckedInstruction,
+        };
+        const transaction = new window.solanaWeb3.Transaction();
+        for (const instructionName of state.parsed.instructionOrder) {
+          const build = builders[instructionName];
+          if (!build) {
+            throw new Error("unsupported_instruction");
+          }
+          transaction.add(build());
+        }
+        transaction.feePayer = state.parsed.userWallet;
+        transaction.recentBlockhash = blockhash.blockhash;
+        transaction.lastValidBlockHeight = blockhash.lastValidBlockHeight;
+        return transaction;
+      }
+
+      function preflightStillSafe() {
+        if (
+          !state.ready ||
+          state.payload?.funding_actionable !== true ||
+          state.payload?.status === "rule_unconfirmed"
+        ) {
+          showAlert("error", "finalize 結果不可操作，已阻擋簽名。");
+          return false;
+        }
+        if (Date.now() >= state.parsed.expiresAtMs) {
+          updateCountdown();
+          return false;
+        }
+        const provider = currentPhantomProvider();
+        const liveWallet = provider?.publicKey?.toBase58?.() ?? null;
+        if (
+          !provider ||
+          !liveWallet ||
+          liveWallet !== state.parsed.userWallet.toBase58()
+        ) {
+          state.provider = provider;
+          state.connectedWallet = liveWallet;
+          showAlert(
+            "error",
+            "Phantom 目前錢包與 finalize 登記的 user_wallet 不符，已阻擋簽名。",
+          );
+          updateButtons();
+          return false;
+        }
+        state.provider = provider;
+        state.connectedWallet = liveWallet;
+        return true;
+      }
+
+      async function signAndSendFunding() {
+        if (state.busy || !preflightStillSafe()) {
+          return;
+        }
+
+        state.busy = true;
+        state.lastFailureCanRetry = false;
+        updateButtons();
+        setWalletStatus("正在向公共 RPC 取得最新 blockhash…");
+
+        let latestBlockhash;
+        try {
+          const connection = new window.solanaWeb3.Connection(
+            PUBLIC_RPC_URL,
+            "confirmed",
+          );
+          latestBlockhash = await connection.getLatestBlockhash("confirmed");
+        } catch (_) {
+          state.busy = false;
+          state.lastFailureCanRetry = true;
+          showAlert(
+            "error",
+            "公共 Solana RPC 無法取得 blockhash（可能正在限流）。沒有送出任何交易；請按「手動重試」，本頁不會自動重試。",
+          );
+          setWalletStatus("取得 blockhash 失敗。");
+          updateCountdown();
+          return;
+        }
+
+        // Required second deadline and wallet check immediately before Phantom.
+        if (!preflightStillSafe()) {
+          state.busy = false;
+          updateCountdown();
+          return;
+        }
+
+        try {
+          const transaction = buildTransaction(latestBlockhash);
+          setWalletStatus("請在 Phantom 核對並簽名；Memo 位於指令 index 0。");
+          const result = await state.provider.signAndSendTransaction(transaction);
+          const signature =
+            typeof result === "string" ? result : result?.signature;
+          if (typeof signature !== "string" || signature.length === 0) {
+            throw new Error("signature_missing");
+          }
+          elements.signature.textContent = signature;
+          elements.signatureBox.classList.add("visible");
+          showAlert(
+            "success",
+            "交易已送出。下一步：複製下方 signature，呼叫 confirm_funding；尚未 confirm 前不要假設入金狀態已更新。",
+          );
+          setWalletStatus("Phantom 已送出交易。");
+          state.lastFailureCanRetry = false;
+        } catch (_) {
+          state.lastFailureCanRetry = true;
+          showAlert(
+            "error",
+            "Phantom 拒絕簽名，或交易送出失敗。沒有自動重試；請核對卡片與剩餘時間後手動重試。",
+          );
+          setWalletStatus("簽名或送出未完成。");
+        } finally {
+          state.busy = false;
+          updateCountdown();
+        }
+      }
+
+      async function copySignature() {
+        const signature = elements.signature.textContent;
+        if (!signature) {
+          return;
+        }
+        try {
+          await navigator.clipboard.writeText(signature);
+          elements.copyButton.textContent = "已複製";
+        } catch (_) {
+          showAlert(
+            "warning",
+            "瀏覽器不允許自動複製。請手動選取並複製完整 signature。",
+          );
+        }
+      }
+
+      function describePayloadError(error) {
+        const code = error instanceof Error ? error.message : "";
+        const messages = {
+          fragment_missing:
+            "URL fragment 缺少 finalize funding 指引。請從 finalize_intent 回傳的完整簽名頁 URL 開啟。",
+          fragment_too_large: "URL fragment 異常過大，已拒絕載入。",
+          fragment_payload_invalid:
+            "無法解析 URL fragment 中的 finalize JSON，已阻擋簽名。",
+          rule_unconfirmed:
+            "監察規則未能確認（rule_unconfirmed）。現在入金會被擱置，頁面已禁止簽名。",
+          invalid_funding_status:
+            "finalize 狀態不是 funding_required，此筆入金不可操作，頁面已禁止簽名。",
+          funding_not_actionable:
+            "finalize 回傳 funding_actionable: false。此筆入金不可操作，頁面已禁止簽名。",
+          signing_not_actionable:
+            "finalize 沒有授權使用者簽名，此頁已禁止操作。",
+          funding_missing:
+            "finalize 沒有提供完整 funding 指引，此頁已禁止操作。",
+          invalid_canonical_identity:
+            "finalize 的 intent_id 或 rule_hash 不是 canonical lower-hex identity，已阻擋簽名。",
+          invalid_instruction_order:
+            "指令順序不符：必須為 0: memo → 1: transfer_checked。此頁不會自行改寫順序。",
+          unsupported_mint:
+            "finalize 指引不是允許的 mainnet USDC mint，已阻擋簽名。",
+          unsupported_memo_program:
+            "Memo program 不符 canonical SPL Memo v2，已阻擋簽名。",
+          user_ata_mismatch:
+            "來源 ATA 與 finalize 的 user_wallet / mint 不一致，已阻擋簽名。",
+          controlled_ata_mismatch:
+            "收款 ATA 與 finalize 的 controlled wallet / mint 不一致，已阻擋簽名。",
+          invalid_expires_at_ms:
+            "finalize 的 expires_at_ms 無效；倒數不能由窗口長度推算，已阻擋簽名。",
+          invalid_amount_raw: "finalize 的 amount_raw 無效，已阻擋簽名。",
+          invalid_decimals:
+            "finalize 的 decimals 無效，TransferChecked 不會使用硬編碼替代值。",
+        };
+        return (
+          messages[code] ??
+          "finalize funding 指引缺漏或無效，為避免錯誤轉帳，此頁已阻擋簽名。"
+        );
+      }
+
+      function isSafeLoopbackOrigin() {
+        return (
+          window.location.protocol === "http:" &&
+          (window.location.hostname === "127.0.0.1" ||
+            window.location.hostname === "localhost" ||
+            window.location.hostname === "::1")
+        );
+      }
+
+      function initialise() {
+        if (!window.solanaWeb3) {
+          showAlert(
+            "error",
+            "無法載入固定版本的 Solana Web3 程式庫。沒有送出任何請求或交易；請檢查網路後手動重新整理。",
+          );
+          return;
+        }
+        if (!isSafeLoopbackOrigin()) {
+          showAlert(
+            "error",
+            "安全阻擋：此簽名頁必須透過 http://127.0.0.1 的 loopback 靜態伺服器開啟；file:// 或對外綁定的網址不可簽名。",
+          );
+          return;
+        }
+
+        try {
+          state.payload = readFinalizePayload();
+          state.funding = state.payload.funding ?? null;
+          state.parsed = validateFundingPayload(state.payload);
+          state.ready = true;
+          state.expired = Date.now() >= state.parsed.expiresAtMs;
+          renderReview();
+          clearAlert();
+          updateCountdown();
+        } catch (error) {
+          state.ready = false;
+          showAlert("error", describePayloadError(error));
+          updateButtons();
+        }
+      }
+
+      elements.connectButton.addEventListener("click", connectPhantom);
+      elements.signButton.addEventListener("click", signAndSendFunding);
+      elements.retryButton.addEventListener("click", signAndSendFunding);
+      elements.copyButton.addEventListener("click", copySignature);
+
+      const providerAtLoad = currentPhantomProvider();
+      providerAtLoad?.on?.("accountChanged", (publicKey) => {
+        state.provider = providerAtLoad;
+        state.connectedWallet = publicKey?.toBase58?.() ?? null;
+        if (state.connectedWallet === null) {
+          setWalletStatus("Phantom 已中斷連接。");
+        } else if (state.parsed && !isExpectedWalletConnected()) {
+          showAlert(
+            "error",
+            `Phantom 已切換到不同錢包，簽名已阻擋。\n目前：${state.connectedWallet}\n要求：${state.parsed.userWallet.toBase58()}`,
+          );
+          setWalletStatus("請切回 finalize 時登記的出資錢包。");
+        } else if (state.parsed) {
+          clearAlert();
+          setWalletStatus(`已核對出資錢包：${state.connectedWallet}`);
+        }
+        updateCountdown();
+      });
+
+      window.addEventListener("hashchange", () => window.location.reload());
+      initialise();
+      window.setInterval(updateCountdown, 500);
+    })();
+  </script>
+</body>
+</html>

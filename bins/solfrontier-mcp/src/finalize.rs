@@ -60,6 +60,7 @@ pub(crate) const LEGACY_TARGET_OBLIGATION_BS58: &str =
     "BdFLjCcP9mCy557vNNGVbTUuvHxXsh8hc6jXzaPra1wN";
 pub(crate) const MEMO_PROGRAM_ID_BS58: &str = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 pub(crate) const WATCH_RULE_EXPIRY_SLOTS: u64 = 480;
+const SIGNING_PAGE_BASE_URL: &str = "http://127.0.0.1:8080/index.html";
 const FUNDING_WINDOW_MS: i64 = 180_000;
 const FUNDING_WINDOW_SECONDS: i64 = FUNDING_WINDOW_MS / 1_000;
 
@@ -354,6 +355,23 @@ where
         }));
     }
 
+    let funding = json!({
+        "user_wallet": current.user_wallet,
+        "user_usdc_ata": current.user_usdc_ata,
+        "controlled_wallet": current.controlled_wallet,
+        "controlled_usdc_ata": current.controlled_usdc_ata,
+        "mint": USDC_MINT_BS58,
+        "decimals": 6,
+        "amount_raw": current.amount_raw.to_string(),
+        "memo": memo,
+        "memo_program_id": MEMO_PROGRAM_ID_BS58,
+        "instruction_order": ["memo", "transfer_checked"],
+        "funding_window_seconds": FUNDING_WINDOW_SECONDS,
+        "expires_at_ms": response_expires_at_ms,
+    });
+    let signing_page_url =
+        build_signing_page_url(current.status.as_str(), &intent_id, &rule_hash, &funding);
+
     Ok(json!({
         "status": current.status.as_str(),
         "draft_id": params.draft_id,
@@ -365,20 +383,8 @@ where
         "funding_actionable": true,
         "created_at_ms": response_created_at_ms,
         "expires_at_ms": response_expires_at_ms,
-        "funding": {
-            "user_wallet": current.user_wallet,
-            "user_usdc_ata": current.user_usdc_ata,
-            "controlled_wallet": current.controlled_wallet,
-            "controlled_usdc_ata": current.controlled_usdc_ata,
-            "mint": USDC_MINT_BS58,
-            "decimals": 6,
-            "amount_raw": current.amount_raw.to_string(),
-            "memo": memo,
-            "memo_program_id": MEMO_PROGRAM_ID_BS58,
-            "instruction_order": ["memo", "transfer_checked"],
-            "funding_window_seconds": FUNDING_WINDOW_SECONDS,
-            "expires_at_ms": response_expires_at_ms,
-        },
+        "funding": funding,
+        "signing_page_url": signing_page_url,
         "signing": {
             "required": true,
             "performed_by_server": false,
@@ -386,6 +392,39 @@ where
             "note": "The connected Phantom wallet must equal funding.user_wallet. This MCP server never signs.",
         },
     }))
+}
+
+fn build_signing_page_url(
+    status: &str,
+    intent_id: &str,
+    rule_hash: &str,
+    funding: &Value,
+) -> String {
+    let payload = json!({
+        "status": status,
+        "funding_actionable": true,
+        "intent_id": intent_id,
+        "rule_hash": rule_hash,
+        "funding": funding,
+    });
+    let encoded_payload = percent_encode_fragment_component(&payload.to_string());
+    format!("{SIGNING_PAGE_BASE_URL}#payload={encoded_payload}")
+}
+
+fn percent_encode_fragment_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    let mut encoded = String::with_capacity(value.len().saturating_mul(3));
+    for &byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
 }
 
 fn unconfirmed_rule_guard(
