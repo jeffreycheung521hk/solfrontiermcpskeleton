@@ -350,7 +350,7 @@ where
             "amount_raw": current.amount_raw.to_string(),
             "memo": memo,
             "memo_program_id": MEMO_PROGRAM_ID_BS58,
-            "instruction_order": ["transfer_checked", "memo"],
+            "instruction_order": ["memo", "transfer_checked"],
             "expiry_seconds": 180,
             "expires_at_ms": response_expires_at_ms,
         },
@@ -850,10 +850,10 @@ mod tests {
         );
         assert_eq!(response["funding"]["user_usdc_ata"], EXPECTED_USER_USDC_ATA);
         assert_eq!(
-            response["funding"]["instruction_order"][0],
-            "transfer_checked"
+            response["funding"]["instruction_order"],
+            json!(["memo", "transfer_checked"]),
+            "the canonical W5h Memo must remain instruction index 0"
         );
-        assert_eq!(response["funding"]["instruction_order"][1], "memo");
         assert_eq!(market.calls(), 1);
 
         let expected_rule = expected_rule();
