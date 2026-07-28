@@ -308,7 +308,7 @@ fn stdio_finalize_without_rpc_is_fail_closed_and_server_stays_alive() {
     );
     assert_eq!(
         finalized.get("draft_consumed").and_then(Value::as_bool),
-        Some(true)
+        Some(false)
     );
 
     let second_list = mcp.request(5, "tools/list", json!({}));

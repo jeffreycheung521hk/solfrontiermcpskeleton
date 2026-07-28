@@ -17,6 +17,11 @@
 //! WatchRule, index its hash in the independent sidecar, then insert the W5h
 //! funding row. It performs no signing, transaction construction, broadcast,
 //! or executor action.
+//!
+//! `funding_window_seconds` is descriptive metadata derived from
+//! `FUNDING_WINDOW_MS`. Any signing-page countdown MUST use the absolute
+//! `expires_at_ms` deadline, never reconstruct a deadline from the window
+//! length.
 
 use std::{
     str::FromStr,
@@ -56,12 +61,17 @@ pub(crate) const LEGACY_TARGET_OBLIGATION_BS58: &str =
 pub(crate) const MEMO_PROGRAM_ID_BS58: &str = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 pub(crate) const WATCH_RULE_EXPIRY_SLOTS: u64 = 480;
 const FUNDING_WINDOW_MS: i64 = 180_000;
+const FUNDING_WINDOW_SECONDS: i64 = FUNDING_WINDOW_MS / 1_000;
 
 /// All proposal fields stay flat on the MCP wire. The two IDs have distinct
 /// jobs: `draft_id` controls one-shot finalization; `draft_hash` attests the
 /// canonical proposal contents. `user_wallet` is the external funding wallet,
 /// resolved from the authenticated session in the predecessor and therefore
 /// intentionally excluded from the earlier draft hash.
+///
+/// Serde documents `flatten` plus `deny_unknown_fields` as unsupported. The
+/// currently locked Serde implementation does reject unknown fields for this
+/// exact shape; `finalize_params_reject_unknown_fields` is the upgrade guard.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FinalizeIntentParams {
@@ -142,9 +152,35 @@ where
         }));
     }
 
-    // Exact predecessor ordering: a matching draft is consumed before wallet
-    // lookup and before any network read. A later failure requires a freshly
-    // proposed draft; the tombstone is never rolled back.
+    // These are MCP-only preconditions. The predecessor received an already
+    // authenticated session wallet and could only start with market wiring
+    // present, so consuming a draft for either failure would invent a new
+    // destructive behavior rather than preserve a legacy one.
+    let Some(market_source) = market_source else {
+        return Ok(json!({
+            "status": "config_missing",
+            "reason": "SOLFRONTIER_RPC_URL is not set",
+            "setup": "Set SOLFRONTIER_RPC_URL in the server environment, restart, then retry finalize with the same unconsumed draft_id",
+            "draft_consumed": false,
+        }));
+    };
+    let user_wallet = match Pubkey::from_str(params.user_wallet.trim()) {
+        Ok(wallet) => wallet,
+        Err(_) => {
+            return Ok(json!({
+                "status": "invalid_user_wallet",
+                "reason": "user_wallet must be a valid Solana public key",
+                "draft_consumed": false,
+            }));
+        }
+    };
+    let usdc_mint = Pubkey::from_str(USDC_MINT_BS58).expect("hard-coded USDC mint must parse");
+    let user_usdc_ata = get_associated_token_address(&user_wallet, &usdc_mint);
+
+    // Once the MCP-only preconditions pass, preserve the predecessor's
+    // consume-before-network-read ordering. A later market or persistence
+    // failure requires a freshly proposed draft; the tombstone is not rolled
+    // back.
     let draft_consumed_at_ms = clock.now_ms();
     match sidecar
         .claim_draft(&params.draft_id, &params.draft_hash, draft_consumed_at_ms)
@@ -172,30 +208,9 @@ where
         }
     }
 
-    let user_wallet = match Pubkey::from_str(params.user_wallet.trim()) {
-        Ok(wallet) => wallet,
-        Err(_) => {
-            return Ok(json!({
-                "status": "invalid_user_wallet",
-                "reason": "user_wallet must be a valid Solana public key",
-                "draft_consumed": true,
-            }));
-        }
-    };
-    let usdc_mint = Pubkey::from_str(USDC_MINT_BS58).expect("hard-coded USDC mint must parse");
-    let user_usdc_ata = get_associated_token_address(&user_wallet, &usdc_mint);
-
     // Preserve the predecessor's timestamp boundary: finalize time is captured
     // after consume and wallet resolution, immediately before market reads.
     let finalize_started_at_ms = clock.now_ms();
-    let Some(market_source) = market_source else {
-        return Ok(json!({
-            "status": "config_missing",
-            "reason": "SOLFRONTIER_RPC_URL is not set",
-            "setup": "Set SOLFRONTIER_RPC_URL in the server environment, restart, and propose a new draft",
-            "draft_consumed": true,
-        }));
-    };
     let snapshot = match market_source.fetch_snapshot().await {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -273,6 +288,16 @@ where
     let persistence = persist_funding_with_legacy_recovery(funding_intents, &new_intent).await?;
     let reused_existing_intent = matches!(persistence, FundingPersistOutcome::Existing(_));
     let current = persistence.into_row();
+    if let Some(response) = unconfirmed_rule_guard(
+        rule_persisted,
+        params,
+        &intent_id,
+        &rule_hash,
+        current.status.as_str(),
+        reused_existing_intent,
+    ) {
+        return Ok(response);
+    }
     if !funding_row_matches_identity(&current, &rule_for_identity, &intent_id, &rule_hash) {
         return Ok(json!({
             "status": "existing_intent_conflict",
@@ -351,7 +376,7 @@ where
             "memo": memo,
             "memo_program_id": MEMO_PROGRAM_ID_BS58,
             "instruction_order": ["memo", "transfer_checked"],
-            "expiry_seconds": 180,
+            "funding_window_seconds": FUNDING_WINDOW_SECONDS,
             "expires_at_ms": response_expires_at_ms,
         },
         "signing": {
@@ -361,6 +386,32 @@ where
             "note": "The connected Phantom wallet must equal funding.user_wallet. This MCP server never signs.",
         },
     }))
+}
+
+fn unconfirmed_rule_guard(
+    rule_persisted: bool,
+    params: &FinalizeIntentParams,
+    intent_id: &str,
+    rule_hash: &str,
+    persisted_funding_status: &str,
+    reused_existing_intent: bool,
+) -> Option<Value> {
+    (!rule_persisted).then(|| {
+        json!({
+            "status": "rule_unconfirmed",
+            "draft_id": params.draft_id,
+            "draft_hash": params.draft_hash,
+            "intent_id": intent_id,
+            "rule_hash": rule_hash,
+            "rule_persisted": false,
+            "funding_intent_persisted": true,
+            "persisted_funding_status": persisted_funding_status,
+            "reused_existing_intent": reused_existing_intent,
+            "funding_actionable": false,
+            "draft_consumed": true,
+            "reason": "the monitoring rule could not be confirmed; funding now would be stranded pending manual refund, so no funding instructions were issued",
+        })
+    })
 }
 
 pub(crate) fn build_watch_rule(draft: &DraftIntent, last_checked_slot: u64) -> WatchRule {
@@ -710,6 +761,26 @@ mod tests {
         }
     }
 
+    fn params_json_with_id(draft_id: &str) -> Value {
+        let params = params_with_id(draft_id);
+        json!({
+            "action": "deposit",
+            "protocol": "solend",
+            "asset": "USDC",
+            "display_source": "save",
+            "comparison": "gt",
+            "amount": "0.5",
+            "threshold_bps": 50,
+            "expiry_seconds_after_finalize": 180,
+            "controlled_wallet": CONTROLLED_WALLET_BS58,
+            "controlled_usdc_ata": CONTROLLED_USDC_ATA_BS58,
+            "original_user_message": "If Save APY > 0.5%, deposit 0.5 USDC",
+            "draft_id": draft_id,
+            "draft_hash": params.draft_hash,
+            "user_wallet": TEST_USER_WALLET,
+        })
+    }
+
     fn snapshot(slot: u64, native_apr_bps: u32, save_apy_bps: u32) -> FinalizeMarketSnapshot {
         FinalizeMarketSnapshot {
             last_checked_slot: slot,
@@ -764,6 +835,70 @@ mod tests {
         }
     }
 
+    #[test]
+    fn finalize_params_reject_unknown_fields() {
+        let valid = params_json_with_id(FIRST_DRAFT_ID);
+        serde_json::from_value::<FinalizeIntentParams>(valid.clone())
+            .expect("the flat wire shape must deserialize");
+
+        let mut with_unknown = valid;
+        with_unknown
+            .as_object_mut()
+            .expect("fixture is an object")
+            .insert("unexpected_field".into(), json!(true));
+        let error = serde_json::from_value::<FinalizeIntentParams>(with_unknown)
+            .expect_err("unknown finalize fields must fail closed");
+        let message = error.to_string();
+        assert!(
+            message.contains("unknown field") && message.contains("unexpected_field"),
+            "unexpected deserialization error: {message}"
+        );
+    }
+
+    #[test]
+    fn unconfirmed_rule_guard_never_exposes_funding_instructions() {
+        let params = params_with_id(FIRST_DRAFT_ID);
+        assert!(
+            unconfirmed_rule_guard(
+                true,
+                &params,
+                EXPECTED_INTENT_ID,
+                EXPECTED_RULE_HASH,
+                "funding_required",
+                false,
+            )
+            .is_none(),
+            "a confirmed rule must continue to the normal response path"
+        );
+
+        let response = unconfirmed_rule_guard(
+            false,
+            &params,
+            EXPECTED_INTENT_ID,
+            EXPECTED_RULE_HASH,
+            "funding_required",
+            false,
+        )
+        .expect("an unconfirmed rule must be blocked at the response boundary");
+        assert_eq!(response["status"], "rule_unconfirmed");
+        assert_eq!(response["rule_persisted"], false);
+        assert_eq!(response["funding_intent_persisted"], true);
+        assert_eq!(response["funding_actionable"], false);
+        assert_eq!(response["draft_consumed"], true);
+        assert!(
+            response.get("funding").is_none(),
+            "an unconfirmed monitoring rule must never expose funding instructions"
+        );
+        assert!(
+            response.get("signing").is_none(),
+            "an unconfirmed monitoring rule must never invite a signature"
+        );
+        assert!(response["reason"]
+            .as_str()
+            .expect("reason is a string")
+            .contains("stranded pending manual refund"));
+    }
+
     #[tokio::test]
     async fn hash_mismatch_writes_nothing_and_never_reads_market() {
         let (file, db, watch_rules, funding_intents, sidecar) = test_store().await;
@@ -801,6 +936,100 @@ mod tests {
             !derive_sidecar_path(&file.path).exists(),
             "hash mismatch must not create the sidecar"
         );
+
+        close_test_store(db, watch_rules, funding_intents, sidecar).await;
+    }
+
+    #[tokio::test]
+    async fn missing_market_config_does_not_consume_draft_or_create_sidecar() {
+        let (file, db, watch_rules, funding_intents, sidecar) = test_store().await;
+        let params = params_with_id(FIRST_DRAFT_ID);
+        let market = MockMarketSource::new(vec![snapshot(FIRST_MARKET_SLOT, 165, 210)]);
+        let clock = StepClock::new(FINALIZE_STARTED_AT_MS, CLOCK_STEP_MS);
+
+        let response = finalize_intent_json::<MockMarketSource, _>(
+            &params,
+            None,
+            &sidecar,
+            &watch_rules,
+            &funding_intents,
+            &clock,
+        )
+        .await
+        .expect("missing configuration is a normal response");
+
+        assert_eq!(response["status"], "config_missing");
+        assert_eq!(response["draft_consumed"], false);
+        assert_eq!(market.calls(), 0);
+        assert!(
+            !derive_sidecar_path(&file.path).exists(),
+            "configuration preflight must not create the sidecar"
+        );
+
+        let retry = finalize_intent_json(
+            &params,
+            Some(&market),
+            &sidecar,
+            &watch_rules,
+            &funding_intents,
+            &clock,
+        )
+        .await
+        .expect("the same unconsumed draft must remain usable");
+        assert_eq!(retry["status"], "funding_required");
+
+        close_test_store(db, watch_rules, funding_intents, sidecar).await;
+    }
+
+    #[tokio::test]
+    async fn invalid_user_wallet_does_not_consume_draft_or_create_sidecar() {
+        let (file, db, watch_rules, funding_intents, sidecar) = test_store().await;
+        let mut params = params_with_id(FIRST_DRAFT_ID);
+        params.user_wallet = "not-a-solana-public-key".to_owned();
+        let market = MockMarketSource::new(vec![snapshot(FIRST_MARKET_SLOT, 165, 210)]);
+        let clock = StepClock::new(FINALIZE_STARTED_AT_MS, CLOCK_STEP_MS);
+
+        let response = finalize_intent_json(
+            &params,
+            Some(&market),
+            &sidecar,
+            &watch_rules,
+            &funding_intents,
+            &clock,
+        )
+        .await
+        .expect("invalid wallet is a normal response");
+
+        assert_eq!(response["status"], "invalid_user_wallet");
+        assert_eq!(response["draft_consumed"], false);
+        assert_eq!(market.calls(), 0);
+        assert!(
+            !derive_sidecar_path(&file.path).exists(),
+            "wallet syntax preflight must not create the sidecar"
+        );
+        assert!(watch_rules
+            .get(&expected_rule().rule_id)
+            .await
+            .expect("watch-rule lookup")
+            .is_none());
+        assert!(funding_intents
+            .get(EXPECTED_INTENT_ID)
+            .await
+            .expect("funding-intent lookup")
+            .is_none());
+
+        params.user_wallet = TEST_USER_WALLET.to_owned();
+        let retry = finalize_intent_json(
+            &params,
+            Some(&market),
+            &sidecar,
+            &watch_rules,
+            &funding_intents,
+            &clock,
+        )
+        .await
+        .expect("the same unconsumed draft must remain usable");
+        assert_eq!(retry["status"], "funding_required");
 
         close_test_store(db, watch_rules, funding_intents, sidecar).await;
     }
@@ -853,6 +1082,14 @@ mod tests {
             response["funding"]["instruction_order"],
             json!(["memo", "transfer_checked"]),
             "the canonical W5h Memo must remain instruction index 0"
+        );
+        assert_eq!(
+            response["funding"]["funding_window_seconds"],
+            FUNDING_WINDOW_SECONDS
+        );
+        assert!(
+            response["funding"].get("expiry_seconds").is_none(),
+            "the ambiguous legacy output name must not reappear"
         );
         assert_eq!(market.calls(), 1);
 

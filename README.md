@@ -22,9 +22,10 @@ default is `./data/solfrontier.db`.
 `get_position` and `finalize_intent` read their mainnet endpoint only from
 `SOLFRONTIER_RPC_URL`. Leaving it unset does not prevent startup or affect the
 other tools; `get_position` returns normal JSON with `status:
-"config_missing"`. Finalize consumes its one-shot draft before its market read,
-so configure RPC and restart the server before proposing a draft that you
-intend to finalize.
+"config_missing"`. Finalize checks RPC configuration and wallet syntax before
+claiming its one-shot draft, so either preflight failure can be fixed and the
+same draft retried. Once those checks pass, the draft is consumed before the
+market read; a later market-data failure requires a new proposal.
 
 Finalize also reads the public Save reserve API at the pinned
 `https://api.solend.fi` base to capture the predecessor-compatible APY
@@ -88,11 +89,13 @@ The controlled wallet and controlled USDC ATA remain pinned to the audited
 legacy values; they cannot be replaced through tool input.
 
 Finalize first recomputes the draft hash. A mismatch returns normal JSON with
-`status: "hash_mismatch"` and makes no write. On a match it atomically records
-a consume-once tombstone for `draft_id` in the MCP-owned sidecar before wallet
-validation or network reads. A later configuration or market-data failure
-therefore consumes that draft: fix the problem and call `propose_intent` again
-instead of retrying the same `draft_id`.
+`status: "hash_mismatch"` and makes no write. Missing RPC configuration and an
+invalid `user_wallet` are also rejected before any consume-once tombstone is
+written, so either condition can be fixed and the same draft retried. Once
+those preflight checks pass, finalize atomically claims `draft_id` in the
+MCP-owned sidecar before the market read. A later `market_data_error` therefore
+consumes that draft: fix the problem and call `propose_intent` again instead of
+retrying the same `draft_id`.
 
 The compatible persistence order is intentionally non-transactional:
 WatchRule, derived sidecar mapping, then funding intent. On success the result
@@ -100,8 +103,17 @@ contains `intent_id`, `rule_hash`, and a complete `funding` object: payer
 wallet/ATA, controlled destination ATA, USDC mint/decimals, exact raw amount,
 deadline, Memo program, and the exact Memo text
 `claw:w5h:<intent_id>:<rule_hash>`. This tool does not construct, sign, or
-submit the funding transaction. The three retained partial-write/timestamp
-defects and their Phase 3 gates are recorded in
+submit the funding transaction. `funding_window_seconds` is descriptive only
+and is derived from the implementation's funding-window constant; every
+signing-page countdown must use the absolute `expires_at_ms` value and must
+never reconstruct a deadline from that window length.
+
+If the legacy non-transactional path writes a funding row but cannot confirm
+the WatchRule, finalize returns `status: "rule_unconfirmed"` with
+`funding_actionable: false` and deliberately omits both `funding` and
+`signing`. Funding at that point would be stranded pending a manual refund.
+The three retained partial-write/timestamp defects, response-level guard, and
+their Phase 3 gates are recorded in
 [`CLAUDE.md`](CLAUDE.md#技術債).
 
 The deterministic legacy rule ID can collide with a previously finalized

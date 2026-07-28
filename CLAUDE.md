@@ -66,12 +66,14 @@ Phase 2 第一切片 `propose_intent` 已完成;第二切片加入明確標示�
 
 - **現況:**為逐字保留舊 bridge 的非事務語意,finalize 先寫 WatchRule,再寫 sidecar 與 funding intent。若程序在第一個主 DB 寫入後中斷,或後續 funding insert 失敗,會留下沒有 funding row 的 rule-only row;沒有 rollback 或 startup reconciler。
 - **目前處理:**draft 已在網絡讀取與主 DB 寫入前被 consume;失敗後必須重新 propose。新 draft 若碰到相同 `rule_id`,沿用舊 collision/readback 路徑嘗試補上 funding row。
+- **測試缺口:**repository 是具體型別,本切片沒有可注入 funding insert/readback 失敗的 seam,所以實際 rule-only 故障路徑無測試覆蓋;此處只記錄缺口,不為測試而改動核心 crate 邊界。
 - **觸發條件:**`Phase 3 executor 上線前,必須決定 watcher 如何對待 orphan/rule-only rows`。
 
 ### DEBT-P2-FINALIZE-2:funding-only orphan
 
 - **現況:**舊 bridge 在 WatchRule insert 失敗且公開 `get` 也無法確認既有 row 時,仍繼續嘗試寫 funding intent。主 DB 沒有跨 repository transaction/FK,因此可能留下沒有 WatchRule 的 funding-only orphan;本切片為忠實相容而保留此缺陷。
-- **目前處理:**sidecar 只為經公開 repository API 確認的 WatchRule 建立 hash 映射,不替 funding-only orphan 背書,也不把衍生索引冒充主資料。
+- **目前處理:**sidecar 只為經公開 repository API 確認的 WatchRule 建立 hash 映射,不替 funding-only orphan 背書,也不把衍生索引冒充主資料。若 funding row 已寫入但 `rule_persisted == false`,新 MCP 回應層 fail closed:回 `status:"rule_unconfirmed"`、`funding_actionable:false`,並完全省略 `funding`/`signing`,避免用戶把資金送進註定無規則可匹配的流程。
+- **測試缺口:**純回應 guard 已有單元測試;但 WatchRule repository 是具體型別,無法注入 insert 加 readback 皆失敗,故實際 funding-only orphan 路徑仍無測試覆蓋。此處只記錄缺口,不改變保留的非交易寫入順序。
 - **觸發條件:**`Phase 3 executor 上線前,必須決定 watcher 如何對待 orphan/rule-only rows`。
 
 ### DEBT-P2-FINALIZE-3:DB 與回傳 funding timestamps 不一致
@@ -80,3 +82,9 @@ Phase 2 第一切片 `propose_intent` 已完成;第二切片加入明確標示�
 - **安全例外:**deterministic `intent_id` collision 走「回既有行」時,不得沿用舊 outer DTO 以本次 request wallet 與新 deadline 拼出 hybrid 指引。MCP bin 會完整核對既有 WatchRule/funding identity;只在同一 funding wallet、仍為 `funding_required` 且既有 deadline 未過期時,回傳主 DB 既有 wallet/ATA/amount/timestamps。wallet、rule shape 或 identity 衝突皆 fail closed 且不給 funding 指引;既有 deadline 已過或 lifecycle 已前進時亦不給可簽指引。
 - **風險:**簽名頁倒數依回傳 deadline 顯示,而 lifecycle/watcher 以主 DB deadline 為準;兩者在邊界附近可能對「已過期」有短暫不同判斷。
 - **觸發條件:**`Phase 3 executor 上線前,必須決定 watcher 如何對待 orphan/rule-only rows`;同次評審必須明定 timestamp 的權威來源與過期邊界。
+
+### DEBT-P2-FINALIZE-4:故障回應測試 seam 缺口
+
+- **現況:**`sidecar_unavailable` 與 `market_data_error` 兩條正常 JSON 回應路徑目前沒有測試覆蓋;前者需要注入 sidecar I/O 故障,後者目前的 finalize 整合測試未固定該回應契約。
+- **處理:**本次覆核只誠實記錄,不為補測試而擴張 repository/sidecar 邊界或改動既有行為。
+- **觸發條件:**後續若重構 MCP bin 的 persistence/market seams,必須同時補上這兩條故障回應測試,並保證失敗後不暴露 funding 指引。
