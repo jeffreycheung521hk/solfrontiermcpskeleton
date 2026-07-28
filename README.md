@@ -148,10 +148,34 @@ consume-once history.
 
 ### Local-only Phantom funding page
 
-`web/signing-page/index.html` is one static file with no project backend and no
-build step. Phantom does not inject its provider into `file://`, so the user
-must serve this directory on loopback. The MCP binary remains stdio-only: it
-does not open an HTTP port or browser.
+`web/signing-page/index.html` is the single HTML entry point of a self-contained,
+build-free static directory with no project backend. All executable JavaScript
+is served locally from that directory; the signing path does not download code
+from a CDN. Phantom does not inject its provider into `file://`, so the user
+must serve the complete directory on loopback. The MCP binary remains
+stdio-only: it does not open an HTTP port or browser.
+
+The page vendors `@solana/web3.js` 1.98.4 at
+`vendor/solana-web3-1.98.4.iife.min.js`. It was downloaded independently from
+the exact former source URL
+`https://cdn.jsdelivr.net/npm/@solana/web3.js@1.98.4/lib/index.iife.min.js` and
+checked byte-for-byte against the authoritative npm tarball
+`https://registry.npmjs.org/@solana/web3.js/-/web3.js-1.98.4.tgz`
+(`package/lib/index.iife.min.js`). The upstream 463,860-byte artifact SHA-384
+is
+`sha384-I45YF+S0YGWIolUyTksLk9TNtTqaDgZg8e6T1OoBoJvvFmphqYNIPZw3Kl0TkZNN`.
+The checked-in asset includes only the provenance header described above; its
+runtime SRI/SHA-384 is
+`sha384-1BCTVxwMWGkdmrSvaJBEHRYT0CcWOFIa2ugv4m58jLNYs50TzfnRE8UVuTOgpvgc`.
+The upstream MIT notice is preserved beside it as
+`vendor/LICENSE.solana-web3.js`. `.gitattributes` marks the executable asset as
+binary so Git cannot rewrite its reviewed bytes through line-ending conversion
+and invalidate SRI on another checkout.
+
+Vendoring removes externally hosted executable code from the 180-second
+signing window and lets CSP restrict scripts to the loopback origin. Phantom
+and the keyless public Solana RPC remain explicit external runtime services;
+the latter is used only to fetch a recent blockhash.
 
 With Python, run this complete command from the repository:
 

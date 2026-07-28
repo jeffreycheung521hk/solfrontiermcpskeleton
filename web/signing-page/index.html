@@ -6,7 +6,7 @@
   <meta name="referrer" content="no-referrer">
   <meta
     http-equiv="Content-Security-Policy"
-    content="default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'unsafe-inline'; connect-src https://api.mainnet-beta.solana.com; img-src data:; base-uri 'none'; form-action 'none'"
+    content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src https://api.mainnet-beta.solana.com; img-src data:; base-uri 'none'; form-action 'none'"
   >
   <title>SolFrontier 入金簽名</title>
   <!--
@@ -16,6 +16,11 @@
     Provenance:
     - bridge/index.html @ 07341bfe388c673bf91ae7a432aa0bfc0596df39
     - frontend/src/lib/stage2-funding.ts (Memo-first funding transaction)
+    - vendored @solana/web3.js 1.98.4:
+      source: https://cdn.jsdelivr.net/npm/@solana/web3.js@1.98.4/lib/index.iife.min.js
+      upstream SHA-384: sha384-I45YF+S0YGWIolUyTksLk9TNtTqaDgZg8e6T1OoBoJvvFmphqYNIPZw3Kl0TkZNN
+      checked-in SHA-384: sha384-1BCTVxwMWGkdmrSvaJBEHRYT0CcWOFIa2ugv4m58jLNYs50TzfnRE8UVuTOgpvgc
+      license: vendor/LICENSE.solana-web3.js
 
     The finalize response is authoritative. In particular, this page uses
     funding.memo verbatim and funding.expires_at_ms as an absolute deadline.
@@ -413,7 +418,10 @@
     </section>
   </main>
 
-  <script src="https://cdn.jsdelivr.net/npm/@solana/web3.js@1.98.4/lib/index.iife.min.js"></script>
+  <script
+    src="vendor/solana-web3-1.98.4.iife.min.js"
+    integrity="sha384-1BCTVxwMWGkdmrSvaJBEHRYT0CcWOFIa2ugv4m58jLNYs50TzfnRE8UVuTOgpvgc"
+  ></script>
   <script>
     "use strict";
 
@@ -1047,7 +1055,7 @@
         if (!window.solanaWeb3) {
           showAlert(
             "error",
-            "無法載入固定版本的 Solana Web3 程式庫。沒有送出任何請求或交易；請檢查網路後手動重新整理。",
+            "無法載入本地 vendored Solana Web3 程式庫。沒有送出任何請求或交易；請確認靜態伺服器公開了完整 web/signing-page 目錄後手動重新整理。",
           );
           return;
         }
