@@ -941,6 +941,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn corrupt_sidecar_blocks_finalize_before_main_database_writes() {
+        let (file, db, watch_rules, funding_intents, sidecar) = test_store().await;
+        fs::write(derive_sidecar_path(&file.path), b"not a sqlite database")
+            .expect("write corrupt sidecar fixture");
+        let params = params_with_id(FIRST_DRAFT_ID);
+        let market = MockMarketSource::new(vec![snapshot(FIRST_MARKET_SLOT, 165, 210)]);
+        let clock = StepClock::new(FINALIZE_STARTED_AT_MS, CLOCK_STEP_MS);
+
+        let response = finalize_intent_json(
+            &params,
+            Some(&market),
+            &sidecar,
+            &watch_rules,
+            &funding_intents,
+            &clock,
+        )
+        .await
+        .expect("an unavailable sidecar is a normal fail-closed response");
+
+        assert_eq!(response["status"], "sidecar_unavailable");
+        assert_eq!(market.calls(), 0, "market seam must not be called");
+        assert!(
+            response.get("funding").is_none(),
+            "sidecar failure must not expose funding instructions"
+        );
+        assert!(
+            response.get("signing").is_none(),
+            "sidecar failure must not invite a signature"
+        );
+        assert!(watch_rules
+            .get(&expected_rule().rule_id)
+            .await
+            .expect("watch-rule lookup")
+            .is_none());
+        assert!(funding_intents
+            .get(EXPECTED_INTENT_ID)
+            .await
+            .expect("funding-intent lookup")
+            .is_none());
+
+        close_test_store(db, watch_rules, funding_intents, sidecar).await;
+    }
+
+    #[tokio::test]
     async fn missing_market_config_does_not_consume_draft_or_create_sidecar() {
         let (file, db, watch_rules, funding_intents, sidecar) = test_store().await;
         let params = params_with_id(FIRST_DRAFT_ID);
