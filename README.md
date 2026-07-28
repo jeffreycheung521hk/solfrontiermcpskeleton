@@ -19,13 +19,14 @@ cargo run --bin solfrontier-mcp   # stdio MCP server
 The state-store path is selected with `--db PATH` or `SOLFRONTIER_DB`; the
 default is `./data/solfrontier.db`.
 
-`get_position` and `finalize_intent` read their mainnet endpoint only from
-`SOLFRONTIER_RPC_URL`. Leaving it unset does not prevent startup or affect the
-other tools; `get_position` returns normal JSON with `status:
-"config_missing"`. Finalize checks RPC configuration and wallet syntax before
-claiming its one-shot draft, so either preflight failure can be fixed and the
-same draft retried. Once those checks pass, the draft is consumed before the
-market read; a later market-data failure requires a new proposal.
+`get_position`, `finalize_intent`, and `confirm_funding` read their mainnet
+endpoint only from `SOLFRONTIER_RPC_URL`. Leaving it unset does not prevent
+startup or affect the other tools; network-dependent calls return normal
+`config_missing` JSON when they have enough local context to reach that
+preflight. Finalize checks RPC configuration and wallet syntax before claiming
+its one-shot draft, so either preflight failure can be fixed and the same draft
+retried. Once those checks pass, the draft is consumed before the market read;
+a later market-data failure requires a new proposal.
 
 Finalize also reads the public Save reserve API at the pinned
 `https://api.solend.fi` base to capture the predecessor-compatible APY
@@ -99,7 +100,9 @@ retrying the same `draft_id`.
 
 The compatible persistence order is intentionally non-transactional:
 WatchRule, derived sidecar mapping, then funding intent. On success the result
-contains `intent_id`, `rule_hash`, and a complete `funding` object: payer
+contains `intent_id`, `rule_hash`, a complete `funding` object, and—only when
+`funding_actionable: true`—a `signing_page_url` under
+`http://127.0.0.1:8080/index.html#...`. Funding fields include payer
 wallet/ATA, controlled destination ATA, USDC mint/decimals, exact raw amount,
 deadline, Memo program, and the exact Memo text
 `claw:w5h:<intent_id>:<rule_hash>`. This tool does not construct, sign, or
@@ -143,19 +146,108 @@ it does not crash or guess. UUID/`intent_id` lookup continues to use the main
 DB. Do not manually edit or delete the sidecar while relying on its
 consume-once history.
 
-### Manual `propose → finalize → status` MCP verification
+### Local-only Phantom funding page
 
-Keep the real RPC URL in the MCP host environment and build the release binary
-before starting this flow. The Save read uses its pinned public endpoint and
-needs no additional configuration.
+`web/signing-page/index.html` is one static file with no project backend and no
+build step. Phantom does not inject its provider into `file://`, so the user
+must serve this directory on loopback. The MCP binary remains stdio-only: it
+does not open an HTTP port or browser.
 
-1. Restart the MCP host and verify `tools/list` contains `get_quote`,
-   `get_position`, `get_intent_status`, `propose_intent`, and
-   `finalize_intent`.
-2. Call `propose_intent` with the example arguments above. Copy its exact
-   `draft_id` and `draft_hash`; do not edit any proposal field afterward.
-3. Call `finalize_intent` with the same proposal fields plus the two returned
-   identifiers and the external Phantom funding wallet:
+With Python, run this complete command from the repository:
+
+```bash
+python -m http.server 8080 --bind 127.0.0.1 --directory web/signing-page
+```
+
+Without Python, use a loopback-bound static server:
+
+```bash
+npx serve -l tcp://127.0.0.1:8080 web/signing-page
+```
+
+The loopback binding and directory restriction are security boundaries; do not
+omit either. In particular, never run bare `python -m http.server 8080` with
+the repository as its serve root. That default can expose the whole checkout
+to the local network, including a local `.env` containing an RPC key.
+
+The actionable URL carries the complete public funding instruction in its URL
+fragment, so the fragment is not sent in the static server's HTTP request or
+access log. Never put a private RPC URL, API key, seed phrase, or private key
+in that URL. The page accepts only the exact `payload=` fragment emitted by
+finalize, uses `funding.memo` verbatim, requires
+`instruction_order == ["memo", "transfer_checked"]`, and takes token decimals
+from finalize rather than hard-coding the transaction byte. It enables signing
+only for `status: "funding_required"` plus `funding_actionable: true`, before
+the absolute `funding.expires_at_ms`, and when the connected Phantom wallet is
+the registered `funding.user_wallet`.
+
+The page displays amount, source/destination ATAs, full Memo, canonical
+identity, and remaining time. Countdown is calculated from the absolute
+`expires_at_ms`; `funding_window_seconds` is never treated as remaining time.
+A keyless public mainnet RPC is used only to fetch a recent blockhash. A
+provider failure or rate limit is shown immediately with an explicit manual
+retry button—there is no silent retry consuming the deadline. Phantom performs
+the one `signAndSendTransaction`; the page then displays the transaction
+signature for `confirm_funding`.
+
+### Write-capable `confirm_funding`
+
+`confirm_funding` accepts `intent_id` and `tx_signature`. It reads the
+transaction at Solana `confirmed` commitment, revalidates the authoritative
+WatchRule and funding row, and requires all of the following before any
+lifecycle write:
+
+- Memo exactly equals `claw:w5h:<intent_id>:<rule_hash>`.
+- The registered `user_wallet` is an on-chain signer.
+- `TransferChecked` uses the registered user ATA, controlled ATA, USDC mint,
+  exact `amount_raw`, registered authority, and finalize-provided decimals.
+- The user ATA's token balance decreases by exactly `amount_raw`; the
+  controlled ATA increases by exactly the same amount.
+- Both token-account owners, both canonical ATAs, the mint, and transaction
+  success all match the main DB identity.
+
+An unconfirmed transaction returns `pending_confirmation` and can be retried
+with the same arguments without changing the DB. RPC errors are reduced to
+fixed safe classes. Any evidence mismatch returns `verification_failed` and
+does not flip lifecycle state. Only a fully valid proof runs the two public
+CAS operations in order:
+`funding_required → funding_submitted → budget_reserved`.
+
+The predecessor actually requested `confirmed`, not `finalized`. The retained
+state-store field name `funding_finalized_slot` stores the top-level
+`getTransaction.result.slot`; the name is not a finalized-commitment guarantee.
+If the second CAS is interrupted, the row may remain `funding_submitted`.
+Retry the same `intent_id` and `tx_signature`: the transaction is fetched and
+fully validated again, the first CAS is idempotent for that signature, and the
+second CAS resumes. `mark_funding_invalid_if_submitted` is not used by this
+validate-before-flip path.
+
+Late funding is judged by the transaction block time (or an explicitly labeled
+confirmation-clock fallback) against the authoritative funding row
+`expires_at_ms`. A valid late payment preserves predecessor behavior and is
+recorded, but the response explicitly says it is refundable and currently
+requires manual handling. The separate WatchRule `expires_at_slot`
+(`created_at_slot + 480`) is also returned because it controls whether the
+future executor can obtain a lease. There is no automatic refund handler yet;
+funds may remain in the controlled ATA.
+
+### Manual Phase 2 funding acceptance
+
+> **180-second hard window:** use the funding row's absolute `expires_at_ms`.
+> Start the static page first, then complete
+> `propose → finalize → open page → Phantom sign → confirm_funding` in one
+> continuous flow. A late payment is recorded but held for manual recovery.
+
+1. Build the release binary and keep the real `SOLFRONTIER_RPC_URL` only in the
+   MCP host environment. The Save read uses its pinned public endpoint.
+2. In another terminal, start the signing page with the exact loopback command
+   above.
+3. Restart the MCP host and verify `tools/list` contains `get_quote`,
+   `get_position`, `get_intent_status`, `propose_intent`, `finalize_intent`,
+   and `confirm_funding`.
+4. Call `propose_intent` with the example arguments above. Immediately call
+   `finalize_intent` with the exact proposal fields, returned `draft_id` and
+   `draft_hash`, plus the Phantom funding wallet:
 
    ```json
    {
@@ -176,17 +268,30 @@ needs no additional configuration.
    }
    ```
 
-4. Approve the host's database-write confirmation. Expect
-   `status: "funding_required"`, a 32-character `intent_id`, a 64-character
-   `rule_hash`, and funding instructions whose Memo embeds both unchanged.
-5. Call `get_intent_status` once with `intent_ref` equal to `rule_hash` and
-   once with `intent_ref` equal to `intent_id`. Both should resolve the same
-   main-DB funding state. If only the hash form returns `unsupported_ref`,
-   treat the sidecar as unavailable and use the returned `intent_id`.
+5. Approve the host's database-write confirmation. Continue only if the
+   response says `funding_actionable: true`; immediately open its
+   `signing_page_url` and compare the amount, controlled ATA, full Memo, and
+   remaining time.
+6. Connect the registered Phantom wallet. A different wallet must be visibly
+   rejected. Confirm Memo is instruction 0 and TransferChecked is instruction
+   1, then sign and send. If the public blockhash RPC fails, use the explicit
+   manual retry once; if the timer reaches zero, start again from propose.
+7. Copy the returned signature and immediately call:
 
-This slice stops at funding instructions. It intentionally does not include a
-Phantom signing page, `confirm_funding`, an HTTP surface, transaction
-construction, or broadcast.
+   ```json
+   {
+     "intent_id": "<INTENT_ID_FROM_FINALIZE>",
+     "tx_signature": "<PHANTOM_TRANSACTION_SIGNATURE>"
+   }
+   ```
+
+8. If the result is `pending_confirmation`, retry those exact arguments—do not
+   sign a second payment. Success is `budget_reserved`. Confirm both
+   `get_intent_status(intent_id)` and `get_intent_status(rule_hash)` resolve
+   that same main-DB lifecycle.
+9. If `late_funding.refundable` is true, retain the signature and stop. The
+   payment was recorded after expiry but is not normal executable funding;
+   refund currently requires manual handling.
 
 ### Development smoke-test data
 
@@ -249,8 +354,8 @@ That external config may contain a provider key: never copy its real value
 into `.env.example`, `.mcp.json`, an issue, a log, or a screenshot. Then:
 
 1. Run `cargo build --release` with the Windows OpenSSL variables above.
-2. Restart Claude Desktop and confirm `tools/list` still contains
-   `get_quote`, `get_position`, `get_intent_status`, and `propose_intent`.
+2. Restart Claude Desktop and confirm `tools/list` still contains all six
+   tools, including `get_position` and `confirm_funding`.
 3. Call `get_position` with `{"wallet":"<BASE58_WALLET_PUBKEY>"}`.
 4. Expect `ok` or `no_position`. An `ok` response contains each obligation
    pubkey, lending market, and deposits with exact raw cToken
@@ -268,8 +373,8 @@ base override is required, set `SOLFRONTIER_JUPITER_BASE_URL` only in the MCP
 host environment; the server does not auto-load dotenv files.
 
 1. Run `cargo build --release` with the Windows OpenSSL variables above.
-2. Restart Claude Desktop and confirm `tools/list` contains `get_quote`,
-   `get_position`, `get_intent_status`, and `propose_intent`.
+2. Restart Claude Desktop and confirm `tools/list` contains all six tools,
+   including `get_quote` and `confirm_funding`.
 3. Call `get_quote` with:
 
    ```json
