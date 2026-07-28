@@ -56,6 +56,13 @@ Phase 2 第一切片 `propose_intent`、第二切片 `finalize_intent` 已完成
 - **驗證真正出資者:**舊驗證器只釘 Memo 與收款 token delta,沒有證明登記的 `user_wallet` 實際出資。新實作另外要求該 wallet 是 signer、其登記 ATA 精確扣款,並核對兩側 ATA owner、mint 與 controlled ATA。沒有任何下游依賴「任何人都可代付」的舊漏洞。
 - **忠實搬遷原則:**忠實搬遷適用於有相容性意義的行為語意,例如非交易式孤兒 row、timestamp 落差與過期後到帳的退款狀態;不適用於安全漏洞。上述兩項是經明確記錄及評審的安全收緊。
 
+### 已接受風險:以 `confirmed` 而非 `finalized` 確認入金
+
+- **風險:**沿用舊系統的 `confirmed` commitment 後,區塊理論上仍可能因叢集分叉而回滾;此時 funding 已標記為 `budget_reserved`,未來 executor 可能動用受控錢包資金執行一筆實際未收到款的意向。
+- **接受理由:**這是舊系統已在 Solana 主網實測驗證過的行為;`confirmed` 回滾需要主網叢集分叉,實務上極罕見。Phase 2 目前仍屬測試規模,因此暫時接受此風險容忍度。
+- **與安全偏離的區別:**「全通過才 flip」與「驗證真正出資者」修補的是攻擊者可主動利用的漏洞;commitment 等級則是風險容忍度參數。一般第三方或 MCP 呼叫者無法單方面觸發 Solana 叢集分叉來製造 `confirmed` 回滾。
+- **重新評估觸發條件:**單筆金額超出測試規模,或系統開始管理任何非測試資金時(兩者取最早),必須重新評估並明確決定是否改為等待 `finalized` 後才 flip 到 `budget_reserved`;評審完成前不得默認沿用測試期容忍度。
+
 ## 工程紀律
 
 - 體積是一級關注:release profile 已設 `opt-level="z"` / `lto="fat"` / `panic="abort"`。新增依賴前先問「會拖進多大的樹」;定期 `cargo bloat --release --crates`。
