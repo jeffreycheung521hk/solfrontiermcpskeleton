@@ -9,7 +9,7 @@ control plane, exposed as an MCP stdio server.
   (post-deadline fixes, canonical) / [testingcrypto2](https://github.com/jeffreycheung521hk/testingcrypto2)
   (hackathon submission).
 
-## Quick start (Phase 1)
+## Quick start (Phase 2)
 
 ```bash
 cargo check --workspace
@@ -27,6 +27,43 @@ Leaving it unset does not prevent startup or affect the other tools;
 proxy or staging endpoint can be selected with
 `SOLFRONTIER_JUPITER_BASE_URL`; raw HTTP errors, response bodies, and the
 configured URL are never returned or logged.
+
+### Pure Phase 2 `propose_intent`
+
+`propose_intent` is a pre-finalization draft calculator, not a finalized intent
+or an on-chain Memo identity. This slice is deliberately pinned to
+`deposit` / `solend` / `USDC` / `save` / `gt`. The decimal `amount` must be
+between `0.10` and `1.00` USDC inclusive and is parsed without floating point;
+`threshold_bps` must be `1..=10000`, and
+`expiry_seconds_after_finalize` must be exactly `180`.
+
+The raw `original_user_message` exists only long enough to be hashed and is
+neither returned nor persisted. A valid proposal returns `status: "ok"`, a
+typed draft summary, and a 64-character lowercase-hex `draft_hash`; invalid
+input returns normal tool JSON with `status: "invalid_input"`. In both cases,
+`persistence.db_row_exists` is `false`, and this tool performs zero database
+writes, network calls, signatures, or transaction construction.
+
+Example MCP tool arguments:
+
+```json
+{
+  "action": "deposit",
+  "protocol": "solend",
+  "asset": "USDC",
+  "display_source": "save",
+  "comparison": "gt",
+  "amount": "0.5",
+  "threshold_bps": 50,
+  "expiry_seconds_after_finalize": 180,
+  "controlled_wallet": "BPfDMmeMBmCbMC1rWh7hwigMBoKGBrKwXxSeUu9hhs5L",
+  "controlled_usdc_ata": "7LFdKcSV7JQYi3or5y9phHVPjhGigu5DDjUakAFbBmk3",
+  "original_user_message": "If Save APY > 0.5%, deposit 0.5 USDC"
+}
+```
+
+Expect `status: "ok"`, a 64-character draft hash, and
+`persistence.db_row_exists: false`.
 
 ### Development smoke-test data
 
@@ -90,7 +127,7 @@ into `.env.example`, `.mcp.json`, an issue, a log, or a screenshot. Then:
 
 1. Run `cargo build --release` with the Windows OpenSSL variables above.
 2. Restart Claude Desktop and confirm `tools/list` still contains
-   `get_quote`, `get_position`, and `get_intent_status`.
+   `get_quote`, `get_position`, `get_intent_status`, and `propose_intent`.
 3. Call `get_position` with `{"wallet":"<BASE58_WALLET_PUBKEY>"}`.
 4. Expect `ok` or `no_position`. An `ok` response contains each obligation
    pubkey, lending market, and deposits with exact raw cToken
@@ -109,7 +146,7 @@ host environment; the server does not auto-load dotenv files.
 
 1. Run `cargo build --release` with the Windows OpenSSL variables above.
 2. Restart Claude Desktop and confirm `tools/list` contains `get_quote`,
-   `get_position`, and `get_intent_status`.
+   `get_position`, `get_intent_status`, and `propose_intent`.
 3. Call `get_quote` with:
 
    ```json
