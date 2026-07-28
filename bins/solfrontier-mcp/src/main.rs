@@ -1,12 +1,14 @@
 //! solfrontier-mcp — MCP stdio server for the SolFrontier bounded-intent control plane.
 //!
-//! Phase 1 scope (docs/重構建議書.md §4):
-//!   three READ-ONLY tools — get_quote / get_position / get_intent_status —
-//!   wired to Claude Desktop over stdio. No write path, no signing, no watcher.
+//! Phase 1 is complete: get_quote / get_position / get_intent_status are
+//! wired to real read backends over stdio. Phase 2 starts with
+//! propose_intent, a pure draft calculator with no persistence, network,
+//! signing, transaction construction, or watcher path.
 //!
 //! System invariants INV-1..INV-8 (原 ARCHITECTURE.md) apply verbatim.
 //! In particular: this binary must NEVER hold main-wallet key material,
-//! and no tool may sign or submit a transaction in Phase 1.
+//! and no tool in the current proposal-only slice may persist, sign, or
+//! submit a transaction.
 //!
 //! API shape follows the official rmcp 1.7 counter/calculator examples
 //! (Parameters wrapper + CallToolResult).
@@ -14,6 +16,7 @@
 #[cfg(test)]
 mod dev_seed;
 mod position;
+mod propose;
 mod quote;
 mod solend_raw;
 mod status;
@@ -32,6 +35,7 @@ use rmcp::{
 use std::path::PathBuf;
 
 use crate::position::{configured_reader_from_env, query_position, RpcSolendPositionReader};
+use crate::propose::{propose_intent_json, ProposeIntentParams};
 use crate::quote::{configured_client_from_env, query_quote, HttpJupiterClient};
 use crate::status::query_intent_status;
 
@@ -84,6 +88,20 @@ impl SolFrontierServer {
             position_reader,
             quote_source,
         }
+    }
+
+    /// PURE. Validate a typed conditional-deposit draft and compute its hash.
+    #[tool(
+        description = "Propose a typed Solend USDC conditional-deposit draft and compute its canonical draft hash (pure calculation; no DB row, network, signature, or transaction)"
+    )]
+    async fn propose_intent(
+        &self,
+        Parameters(p): Parameters<ProposeIntentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let body = propose_intent_json(&p);
+        Ok(CallToolResult::success(vec![Content::text(
+            body.to_string(),
+        )]))
     }
 
     /// READ-ONLY. Jupiter quote preview — no transaction is built or signed.
@@ -155,9 +173,10 @@ struct Cli {
 }
 
 const INSTRUCTIONS: &str = "SolFrontier is a fail-closed, policy-gated control plane for bounded \
-Solana DeFi intents. The AI proposes; only humans approve and sign (INV-1). All tools in Phase 1 \
-are read-only: nothing here builds, signs, or submits a transaction. Funding/signing always happens \
-in the user's own wallet (Phantom) via a separate signing page, never through this server.";
+Solana DeFi intents. The AI proposes; only humans approve and sign (INV-1). Current tools are \
+read-only or pure draft calculations: nothing here persists a proposal, builds, signs, or submits \
+a transaction. Funding/signing always happens in the user's own wallet (Phantom) via a separate \
+signing page, never through this server.";
 
 #[tool_handler]
 impl ServerHandler for SolFrontierServer {
@@ -182,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    tracing::info!("solfrontier-mcp starting (stdio, Phase 1 read-only)");
+    tracing::info!("solfrontier-mcp starting (stdio, Phase 2 proposal-only slice)");
     let position_reader = configured_reader_from_env();
     let quote_source = configured_client_from_env();
     let db = Database::open(&DatabaseConfig {
@@ -195,4 +214,175 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        ffi::OsString,
+        fs,
+        path::{Path, PathBuf},
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+
+    use super::*;
+    use crate::propose::tests::valid_params;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct FileFingerprint {
+        exists: bool,
+        bytes: Vec<u8>,
+        modified: Option<SystemTime>,
+    }
+
+    struct TemporaryDatabase {
+        path: PathBuf,
+    }
+
+    impl TemporaryDatabase {
+        fn new() -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "solfrontier-propose-no-write-{}-{nonce}.db",
+                std::process::id()
+            ));
+            assert!(path.starts_with(std::env::temp_dir()));
+            Self { path }
+        }
+
+        fn family_paths(&self) -> [PathBuf; 3] {
+            [
+                self.path.clone(),
+                with_suffix(&self.path, "-wal"),
+                with_suffix(&self.path, "-shm"),
+            ]
+        }
+
+        fn snapshot(&self) -> Vec<FileFingerprint> {
+            self.family_paths()
+                .iter()
+                .map(|path| {
+                    if !path.exists() {
+                        return FileFingerprint {
+                            exists: false,
+                            bytes: Vec::new(),
+                            modified: None,
+                        };
+                    }
+                    FileFingerprint {
+                        exists: true,
+                        bytes: fs::read(path).expect("read SQLite fingerprint"),
+                        modified: Some(
+                            fs::metadata(path)
+                                .expect("SQLite metadata")
+                                .modified()
+                                .expect("SQLite modified time"),
+                        ),
+                    }
+                })
+                .collect()
+        }
+
+        fn cleanup_best_effort(&self) -> bool {
+            let temporary_root = std::env::temp_dir();
+            for _ in 0..20 {
+                let mut retry = false;
+                for path in self.family_paths() {
+                    if !path.starts_with(&temporary_root) {
+                        return false;
+                    }
+                    match fs::remove_file(&path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(_) => retry = true,
+                    }
+                }
+                if !retry {
+                    return true;
+                }
+                // Windows can retain SQLite handles briefly after every pool
+                // clone is dropped. Cleanup must never turn that lag into a
+                // test failure.
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        }
+    }
+
+    impl Drop for TemporaryDatabase {
+        fn drop(&mut self) {
+            let _ = self.cleanup_best_effort();
+        }
+    }
+
+    fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+        let mut value = OsString::from(path.as_os_str());
+        value.push(suffix);
+        PathBuf::from(value)
+    }
+
+    async fn wait_for_stable_fingerprint(database: &TemporaryDatabase) -> Vec<FileFingerprint> {
+        let mut previous = database.snapshot();
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let current = database.snapshot();
+            if current == previous {
+                return current;
+            }
+            previous = current;
+        }
+        panic!("SQLite files did not settle after startup migrations");
+    }
+
+    #[test]
+    fn propose_tool_leaves_migrated_database_bytes_and_mtime_unchanged() {
+        let temporary_database = TemporaryDatabase::new();
+        let runtime = tokio::runtime::Runtime::new().expect("create isolated test runtime");
+        let (before, after) = runtime.block_on(async {
+            let db = Database::open(&DatabaseConfig {
+                path: temporary_database.path.to_string_lossy().into_owned(),
+                ..DatabaseConfig::default()
+            })
+            .await
+            .expect("open migrated test database");
+            let server = SolFrontierServer::new(&db, None, configured_client_from_env());
+
+            // Startup migrations are allowed. Close every shared pool connection,
+            // then establish the baseline so only the tool call is measured.
+            db.pool().close().await;
+            let before = wait_for_stable_fingerprint(&temporary_database).await;
+
+            let result = server
+                .propose_intent(Parameters(valid_params()))
+                .await
+                .expect("propose tool call");
+
+            let result_json = serde_json::to_value(result).expect("serialize tool result");
+            let body: serde_json::Value = serde_json::from_str(
+                result_json["content"][0]["text"]
+                    .as_str()
+                    .expect("text tool content"),
+            )
+            .expect("parse proposal JSON");
+            assert_eq!(body["status"], "ok");
+            assert_eq!(body["draft_hash"].as_str().expect("draft hash").len(), 64);
+
+            let after = temporary_database.snapshot();
+            drop(server);
+            drop(db);
+            (before, after)
+        });
+        drop(runtime);
+        assert!(
+            temporary_database.cleanup_best_effort(),
+            "temporary SQLite files must be removable after the isolated runtime stops"
+        );
+        assert_eq!(
+            after, before,
+            "propose_intent must not change SQLite bytes, sidecars, or mtimes"
+        );
+    }
 }

@@ -339,3 +339,46 @@ table, cargo-bloat attributes 48.7KiB to reqwest (up 9.2KiB) while h2 remains
 
 Note: numbers above are a result of guesswork. They are not 100% correct and never will be.
 === end cargo bloat stdout after jupiter quote ===
+
+=== after propose intent (2026-07-28) ===
+Binary: target\release\solfrontier-mcp.exe
+Normal cargo build --release size: 5112832 bytes (4993.0KiB)
+Binary size after cargo-bloat analysis: 5113856 bytes (4994.0KiB)
+Previous Jupiter-quote normal size: 5075456 bytes (4956.5KiB)
+Normal-build increase: 37376 bytes (36.5KiB, +0.7%)
+Previous Jupiter-quote cargo-bloat size: 5076480 bytes (4957.5KiB)
+Analysis-build increase: 37376 bytes (36.5KiB, +0.7%)
+
+No dependency was added for this slice. The measured delta is the pure typed
+validation and backward-compatible draft-hash implementation, reusing the
+already-linked runtime and SHA-256 support. cargo-bloat attributes 130.6KiB to
+solfrontier_mcp, up 12.5KiB from the previous 118.1KiB crate row; the total
+normal binary increase remains below one percent.
+
+=== cargo bloat --release --crates -n 20 after propose intent (stdout; trailing whitespace omitted) ===
+ File  .text     Size Crate
+18.7%  26.1% 933.0KiB
+ 8.6%  12.1% 431.9KiB std
+ 4.6%   6.4% 228.5KiB h2
+ 3.7%   5.2% 186.4KiB rmcp
+ 3.0%   4.1% 147.6KiB hyper
+ 2.9%   4.1% 147.0KiB rustls
+ 2.9%   4.1% 146.5KiB serde_core
+ 2.6%   3.7% 130.6KiB solfrontier_mcp
+ 2.0%   2.9% 102.2KiB clap_builder
+ 1.5%   2.1%  74.2KiB tokio
+ 1.3%   1.9%  66.9KiB ring
+ 1.3%   1.8%  64.1KiB futures_util
+ 1.1%   1.5%  53.9KiB zstd_sys
+ 1.1%   1.5%  53.8KiB serde_json
+ 1.0%   1.4%  50.2KiB sqlx_sqlite
+ 1.0%   1.4%  48.7KiB reqwest
+ 0.9%   1.2%  43.6KiB sqlx_core
+ 0.9%   1.2%  42.7KiB libsqlite3_sys
+ 0.7%   1.0%  35.0KiB claw_types
+ 0.7%   1.0%  34.4KiB hashbrown
+ 8.0%  11.2% 401.8KiB And 116 more crates. Use -n N to show more.
+71.6% 100.0%   3.5MiB .text section size, the file size is 4.9MiB
+
+Note: numbers above are a result of guesswork. They are not 100% correct and never will be.
+=== end cargo bloat stdout after propose intent ===

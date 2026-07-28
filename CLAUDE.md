@@ -33,14 +33,16 @@ SolFrontier(前身 ClawSolana / Solfrontier2026)的 MCP 重構版:一個 policy-
 
 **禁止**重新引入:自製 LLM client / ReAct loop(舊 agent-runtime)、HTTP API surface(舊 api crate)、chat UI。這些由 MCP host 提供。
 
-## 目前階段:Phase 1(唯讀)
+## 目前階段:Phase 2(草稿提案)
 
-目標:`get_quote` / `get_position` / `get_intent_status` 三個唯讀 tools 在 Claude Desktop 端到端跑通。
+Phase 1 已完成:`get_quote`、`get_position`、`get_intent_status` 三個唯讀 tools 已分別接上 Jupiter、Solana RPC/Solend 與 state-store 真實後端,並通過 stdio MCP 驗證。
 
-1. `bins/solfrontier-mcp/src/main.rs` 是**未經編譯**的骨架(在無法編譯的沙盒中寫成)。第一件事:`cargo check`,對照 docs.rs/rmcp(1.7.x,以 crates.io 最新版為準)修正宏/import 偏差。
-2. 逐一把三個 stub 接上真實後端(來源檔在舊 repo `crates/gateway/src/tools/`,見 main.rs 內 TODO)。
-3. 接 Claude Desktop 驗證(`claude_desktop_config.json` 加 stdio server 條目)。
-4. Phase 2+ 見建議書 §4;不要跳階段。
+本階段從 `propose_intent` 開始:
+
+1. MCP host 直接提供由 schemars schema 驗證的 typed 參數;不移植舊 `stage2_llm_intent_extractor`。
+2. `propose_intent` 只驗證條件、精確解析 USDC 金額並計算向後相容的 canonical draft hash;此時 `No DB row exists at this point`。
+3. 此切片零 DB 寫入、零網絡呼叫、零簽名、零交易建構;`finalize_intent` 和任何寫入/執行路徑不在範圍。
+4. Phase 2 後續見建議書 §4;每個寫路徑切片必須獨立評審。
 
 ## 工程紀律
 
