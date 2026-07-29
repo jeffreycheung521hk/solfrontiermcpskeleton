@@ -8,12 +8,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: gate-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # A push to an open PR emits both push and pull_request events. Use the
+  # shared head branch name so the newer run cancels the duplicate cold build.
+  group: gate-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
-  windows-gate:
-    name: Windows workspace gate
+  validate:
+    name: Windows validate
     runs-on: windows-latest
     timeout-minutes: 120
     env:
@@ -36,7 +38,7 @@ jobs:
       - name: Cache Rust build inputs
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: windows-gate
+          shared-key: windows-validate
           cache-on-failure: true
 
       - name: Guard frozen core crates
@@ -138,6 +140,28 @@ jobs:
 
       - name: Test workspace
         run: cargo test --workspace
+
+  release-artifact:
+    name: Windows release artifact
+    needs: validate
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache release build inputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-release
+          cache-on-failure: true
 
       - name: Build release binary
         run: cargo build --release
