@@ -269,6 +269,9 @@ funds may remain in the controlled ATA.
 
 ### Manual Phase 2 funding acceptance
 
+The completed 0.1 USDC mainnet acceptance and post-merge gate are recorded in
+[`docs/phase2-mainnet-acceptance.md`](docs/phase2-mainnet-acceptance.md).
+
 > **180-second hard window:** use the funding row's absolute `expires_at_ms`.
 > Start the static page first, then complete
 > `propose → finalize → open page → Phantom sign → confirm_funding` in one

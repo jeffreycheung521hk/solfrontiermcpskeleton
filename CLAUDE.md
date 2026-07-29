@@ -36,7 +36,12 @@ SolFrontier(前身 ClawSolana / Solfrontier2026)的 MCP 重構版:一個 policy-
 
 `web/signing-page` 是使用者自行啟動的 loopback-only 靜態檔案,不是 MCP HTTP API;不得把其伺服器、路由或自動開瀏覽器邏輯塞進 MCP binary。
 
-## 目前階段:Phase 2(草稿提案 → finalize → 入金確認)
+## 目前階段:Phase 2 已完成;Phase 3 尚未開始
+
+Phase 2 已於 2026-07-29 以 0.1 USDC 完成 Solana mainnet 全流程驗收，
+並在 PR #4 合併後於 `main` 重跑完整 gate。公開交易、驗證項目與
+`confirmed` commitment 的殘餘風險說明見
+`docs/phase2-mainnet-acceptance.md`。
 
 Phase 1 已完成:`get_quote`、`get_position`、`get_intent_status` 三個唯讀 tools 已分別接上 Jupiter、Solana RPC/Solend 與 state-store 真實後端,並通過 stdio MCP 驗證。
 
