@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use claw_protocols::jupiter::quote::{SwapQuoteRequest, SwapQuoteResponse};
 use serde_json::{json, Value};
 
 pub(crate) const SOL_MINT_BS58: &str = "So11111111111111111111111111111111111111112";
@@ -25,62 +25,6 @@ const QUOTE_TIMEOUT: Duration = Duration::from_secs(8);
 const STATUS_OK: &str = "ok";
 const STATUS_POLICY_BLOCKED: &str = "policy_blocked";
 const STATUS_API_ERROR: &str = "api_error";
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SwapQuoteRequest {
-    pub(crate) input_mint: String,
-    pub(crate) output_mint: String,
-    pub(crate) amount: u64,
-    pub(crate) slippage_bps: u16,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum SwapMode {
-    ExactIn,
-    ExactOut,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SwapQuoteResponse {
-    pub(crate) input_mint: String,
-    pub(crate) in_amount: String,
-    pub(crate) output_mint: String,
-    pub(crate) out_amount: String,
-    pub(crate) other_amount_threshold: String,
-    pub(crate) swap_mode: SwapMode,
-    pub(crate) slippage_bps: u16,
-    #[serde(default)]
-    pub(crate) price_impact_pct: Option<String>,
-    #[serde(default)]
-    pub(crate) route_plan: Vec<RoutePlanStep>,
-    #[serde(default)]
-    pub(crate) context_slot: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RoutePlanStep {
-    pub(crate) swap_info: SwapInfo,
-    pub(crate) percent: u8,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SwapInfo {
-    pub(crate) amm_key: String,
-    #[serde(default)]
-    pub(crate) label: Option<String>,
-    pub(crate) input_mint: String,
-    pub(crate) output_mint: String,
-    pub(crate) in_amount: String,
-    pub(crate) out_amount: String,
-    #[serde(default)]
-    pub(crate) fee_amount: Option<String>,
-    #[serde(default)]
-    pub(crate) fee_mint: Option<String>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum QuoteReadError {
@@ -294,6 +238,8 @@ fn quote_error_class(error: QuoteReadError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+
+    use claw_protocols::jupiter::quote::{RoutePlanStep, SwapInfo, SwapMode};
 
     use super::*;
 

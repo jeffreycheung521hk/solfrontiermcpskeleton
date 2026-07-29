@@ -7,6 +7,7 @@ members = [
     "crates/solana-core",
     "crates/wallet-engine",
     "crates/risk-engine",
+    "crates/protocols",
     "bins/solfrontier-mcp",
 ]
 
@@ -80,13 +81,15 @@ async-trait = { version = "0.1" }
 dashmap     = { version = "5" }
 parking_lot = { version = "0.12" }
 
-# workspace crates(只保留六個核心 crate;gateway/agent-runtime/api/channels 已按建議書刪除)
+# workspace crates(六個核心 crate 保持凍結;Phase 3 新增純 protocols 邊界;
+# gateway/agent-runtime/api/channels 已按建議書刪除)
 claw-types         = { path = "crates/types" }
 claw-observability = { path = "crates/observability" }
 claw-state-store   = { path = "crates/state-store" }
 claw-solana-core   = { path = "crates/solana-core" }
 claw-wallet-engine = { path = "crates/wallet-engine" }
 claw-risk-engine   = { path = "crates/risk-engine" }
+claw-protocols     = { path = "crates/protocols" }
 
 # ── 體積優先 release profile(建議書 §3.2)──────────────────────
 [profile.release]

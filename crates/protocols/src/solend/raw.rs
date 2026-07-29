@@ -8,9 +8,9 @@
 //!
 //! Deliberately omitted from the predecessor module: the reserve layout and
 //! decoder, oracle-sentinel handling, reserve liquidity/rate math, mapping
-//! helpers, and reserve fixtures. This Phase 1 slice only discovers and
-//! decodes obligation accounts. Phase 3 will move this protocol-specific
-//! decoder to `crates/protocols/solend`.
+//! helpers, and reserve fixtures. The Phase 1 slice only discovers and decodes
+//! obligation accounts; Phase 3 moved that protocol-specific subset here
+//! without widening its behavior.
 
 use solana_sdk::pubkey::Pubkey;
 
@@ -208,8 +208,9 @@ pub fn decode_obligation(data: &[u8]) -> Result<SolendObligationRaw, DecodeError
     })
 }
 
-#[cfg(test)]
-pub(crate) struct ObligationTestFixture {
+#[cfg(any(test, feature = "test-fixtures"))]
+#[doc(hidden)]
+pub struct ObligationTestFixture {
     pub data: Vec<u8>,
     pub owner: Pubkey,
     pub lending_market: Pubkey,
@@ -219,8 +220,9 @@ pub(crate) struct ObligationTestFixture {
 
 /// Fixed one-deposit fixture matching the deployed mainnet account shape seen
 /// by the predecessor's Slice 3G regression test.
-#[cfg(test)]
-pub(crate) fn one_deposit_test_fixture() -> ObligationTestFixture {
+#[cfg(any(test, feature = "test-fixtures"))]
+#[doc(hidden)]
+pub fn one_deposit_test_fixture() -> ObligationTestFixture {
     const MAIN_POOL_LENDING_MARKET: &str = "4UpD2fh7xH3VP9QQaXtsS1YY3bxzWhtfpks7FatyKvdY";
     const MAIN_POOL_USDC_RESERVE: &str = "BgxfHJDzm44T7XG68MYKx7YisTjZu73tVovyZSjJMpmw";
     const LAST_UPDATE_SLOT: u64 = 415_083_795;

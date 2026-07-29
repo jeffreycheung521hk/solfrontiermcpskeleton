@@ -26,7 +26,6 @@ mod position;
 mod propose;
 mod quote;
 mod sidecar;
-mod solend_raw;
 mod status;
 
 use clap::Parser;

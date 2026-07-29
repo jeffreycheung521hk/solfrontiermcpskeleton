@@ -6,6 +6,10 @@
 
 use std::str::FromStr;
 
+use claw_protocols::solend::raw::{
+    decode_obligation, SolendObligationRaw, OBLIGATION_LEN, OBLIGATION_OWNER_OFFSET,
+    SOLEND_PROGRAM_ID_BS58,
+};
 use claw_solana_core::{rpc::EndpointConfig, RpcPool, RpcPoolConfig};
 use serde_json::{json, Value};
 use solana_account_decoder::UiAccountEncoding;
@@ -14,11 +18,6 @@ use solana_client::{
     rpc_filter::{Memcmp, RpcFilterType},
 };
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey};
-
-use crate::solend_raw::{
-    decode_obligation, SolendObligationRaw, OBLIGATION_LEN, OBLIGATION_OWNER_OFFSET,
-    SOLEND_PROGRAM_ID_BS58,
-};
 
 const RPC_ENDPOINT_LABEL: &str = "configured-read-rpc";
 const STATUS_OK: &str = "ok";
@@ -252,7 +251,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::solend_raw::one_deposit_test_fixture;
+    use claw_protocols::solend::raw::one_deposit_test_fixture;
 
     type MockReadResult = Result<Vec<(Pubkey, Vec<u8>)>, PositionReadError>;
 

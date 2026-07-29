@@ -27,21 +27,25 @@ SolFrontier(前身 ClawSolana / Solfrontier2026)的 MCP 重構版:一個 policy-
 | 位置 | 狀態 | 說明 |
 |---|---|---|
 | `crates/types` `observability` `state-store` `solana-core` `wallet-engine` `risk-engine` | **原封搬入,不動邊界** | 來自 Solfrontier2026,是 mainnet proof 的信任錨 |
-| `bins/solfrontier-mcp` | 新寫 | rmcp stdio server;所有 MCP Rust 新碼的落點 |
+| `bins/solfrontier-mcp` | MCP 入口 | rmcp stdio server;負責 tools、transport、runtime/config 與後端協調 glue,純 protocol logic 下沉 `crates/protocols` |
 | `web/signing-page` | Phase 2 靜態頁 | 單一 HTML 入口 + 本地 vendored JS 的 build-free Phantom 入金目錄;零後端接觸、簽名時不下載外部託管程式碼,由使用者自行以只綁 `127.0.0.1` 且只公開該目錄的靜態伺服器啟動;MCP binary 不開 HTTP port、不自動開瀏覽器 |
-| (未來) `crates/protocols/` | Phase 3 | Jupiter/Solend builders,從舊 gateway 抽取 |
+| `crates/protocols/` | Phase 3 進行中 | 純 Jupiter/Solend wire types、decoders 與 unsigned builders;不得依賴 approval/pending state、DB、network、signing 或 submission |
 | (未來) `crates/executor` | Phase 3 | watcher + CAS lease + controlled-wallet executor |
 
 **禁止**重新引入:自製 LLM client / ReAct loop(舊 agent-runtime)、HTTP API surface(舊 api crate)、chat UI。這些由 MCP host 提供。
 
 `web/signing-page` 是使用者自行啟動的 loopback-only 靜態檔案,不是 MCP HTTP API;不得把其伺服器、路由或自動開瀏覽器邏輯塞進 MCP binary。
 
-## 目前階段:Phase 2 已完成;Phase 3 尚未開始
+## 目前階段:Phase 2 已完成;Phase 3 第一切片進行中
 
 Phase 2 已於 2026-07-29 以 0.1 USDC 完成 Solana mainnet 全流程驗收，
 並在 PR #4 合併後於 `main` 重跑完整 gate。公開交易、驗證項目與
 `confirmed` commitment 的殘餘風險說明見
 `docs/phase2-mainnet-acceptance.md`。
+
+Phase 3 第一切片正在 `feat/phase3-protocols` 建立純 `claw-protocols`
+邊界,搬入 Jupiter/Solend 的 wire types、decoder 與通過純度審計的
+unsigned builders;MCP bin 只改引用路徑,不在搬遷 PR 混入行為改動。
 
 Phase 1 已完成:`get_quote`、`get_position`、`get_intent_status` 三個唯讀 tools 已分別接上 Jupiter、Solana RPC/Solend 與 state-store 真實後端,並通過 stdio MCP 驗證。
 
@@ -73,7 +77,7 @@ Phase 2 第一切片 `propose_intent`、第二切片 `finalize_intent` 已完成
 - 體積是一級關注:release profile 已設 `opt-level="z"` / `lto="fat"` / `panic="abort"`。新增依賴前先問「會拖進多大的樹」;定期 `cargo bloat --release --crates`。
 - 依賴收窄的 TODO 標記在根 `Cargo.toml`(tokio features、pubsub-client、token-2022)— 動它們時先 grep 用途。
 - stdio server 的 stdout 專屬 JSON-RPC:**所有日誌走 stderr**(已在 main.rs 設定,勿改)。
-- 格式化只用 `cargo fmt -p solfrontier-mcp`,永不使用 `cargo fmt --all`;每個 commit 前必須跑 `git diff --exit-code -- crates`,確認六個核心 crate 零 diff。
+- 格式化只對受影響 package 執行 `cargo fmt -p solfrontier-mcp` 與 `cargo fmt -p claw-protocols`,永不使用 `cargo fmt --all`;每個 commit 前必須跑 `git diff --exit-code -- crates/types crates/observability crates/state-store crates/solana-core crates/wallet-engine crates/risk-engine`,確認六個凍結核心 crate 零 diff。
 - 大型搬移遵守舊 DEBT.md 的 PC-1/PC-2/PC-3(路徑審計;一 PR 一主題、不混邏輯改動;由低風險到高風險)。
 - 測試命名用語意名,不要沿用舊 repo 的 prompt-session 前綴(p1_/n6_/w5h_)。
 
