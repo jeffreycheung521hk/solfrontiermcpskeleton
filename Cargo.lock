@@ -798,6 +798,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "claw-protocols"
+version = "0.1.0"
+dependencies = [
+ "base64 0.21.7",
+ "bincode",
+ "bs58",
+ "serde",
+ "serde_json",
+ "solana-sdk",
+ "spl-associated-token-account 6.0.0",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "claw-risk-engine"
 version = "0.1.0"
 dependencies = [
@@ -5435,6 +5449,7 @@ dependencies = [
  "anyhow",
  "clap",
  "claw-observability",
+ "claw-protocols",
  "claw-risk-engine",
  "claw-solana-core",
  "claw-state-store",
