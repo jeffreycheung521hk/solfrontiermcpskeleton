@@ -208,7 +208,9 @@ the registered `funding.user_wallet`.
 The page displays amount, source/destination ATAs, full Memo, canonical
 identity, and remaining time. Countdown is calculated from the absolute
 `expires_at_ms`; `funding_window_seconds` is never treated as remaining time.
-A keyless public mainnet RPC is used only to fetch a recent blockhash. A
+The page pins the keyless public mainnet endpoint
+`https://solana-rpc.publicnode.com` solely to fetch a recent blockhash. The
+endpoint must accept JSON-RPC POSTs from the loopback page's browser Origin; a
 provider failure or rate limit is shown immediately with an explicit manual
 retry button—there is no silent retry consuming the deadline. Phantom performs
 the one `signAndSendTransaction`; the page then displays the transaction
