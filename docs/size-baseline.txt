@@ -519,3 +519,19 @@ Note: numbers above are a result of guesswork. They are not 100% correct and nev
 
 === local target/debug disk incident (2026-07-29) ===
 `target/debug` 曾累積至約 209GB;清除後的一輪 fresh workspace gate 實測為 6,618,485,126 bytes(6.164GiB,8,467 files),其中 `deps/` 4.755GiB、`incremental/` 0.876GiB、Windows PDB 2.581GiB、rlib 2.041GiB。調查排除 `claw-protocols/test-fixtures` 為主因:該空 feature 不啟用額外 dependency feature,只由 `solfrontier-mcp` dev-dependency 啟用;fresh target 只有一份 `libclaw_protocols` rlib、一份 `libsolana_sdk` rlib,protocols 的兩個 incremental sessions 合計約 38.2MiB。209GB 原始 cache 已刪除,故不能事後逐 byte 歸因;但 fresh 分布與 Cargo 行為支持主因是長期交替 package/workspace、dev/test、branch/feature/profile 環境後殘留的多代 fingerprint、PDB、rlib 與 incremental sessions,Cargo 不會自動回收舊 generation,而非 test-fixtures 複製整棵 Solana dependency tree。全量 gate 因此移至具獨立 cache 與 120 分鐘預算的 Windows GitHub Actions jobs;本機僅做輕量預檢。
+
+=== after Solend reserve execution decoder (Windows CI, 2026-07-29) ===
+Gate run: https://github.com/jeffreycheung521hk/solfrontiermcpskeleton/actions/runs/30459550075
+Artifact: https://github.com/jeffreycheung521hk/solfrontiermcpskeleton/actions/runs/30459550075/artifacts/8727983454
+Binary: target\release\solfrontier-mcp.exe
+Windows CI release size: 5259264 bytes (5136.0KiB, 5.015625MiB)
+Previous Windows CI gate baseline: 5259264 bytes (5136.0KiB, 5.015625MiB)
+Change: 0 bytes (0.0%)
+Binary SHA-256: 387F6DC51B6C5C90FBCA449156D6BA6E0479E99D4BD58C2285EFD077951C664F
+
+The comparison is Windows-to-Windows on the same Rust 1.97.1 runner image and
+normal `cargo build --release` profile. This slice adds a pure reserve decoder
+and golden tests but no live release call site; fat LTO therefore leaves the
+shipping PE size unchanged. `cargo-bloat` was not rerun locally after the gate
+moved to CI, so this entry deliberately reports the reproducible CI artifact
+measurement rather than mixing it with the older local analysis-build series.
