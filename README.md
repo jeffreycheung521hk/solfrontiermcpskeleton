@@ -210,8 +210,18 @@ identity, and remaining time. Countdown is calculated from the absolute
 `expires_at_ms`; `funding_window_seconds` is never treated as remaining time.
 The page pins the keyless public mainnet endpoint
 `https://solana-rpc.publicnode.com` solely to fetch a recent blockhash. The
-endpoint must accept JSON-RPC POSTs from the loopback page's browser Origin; a
-provider failure or rate limit is shown immediately with an explicit manual
+Solana public endpoint previously used here is unsuitable for this browser
+handoff: its CORS preflight accepts the loopback Origin, but its JSON-RPC POST
+returns HTTP 403 when that Origin is present. CSP therefore replaces that
+endpoint with only the exact PublicNode origin; it does not add a second
+network destination.
+
+This blockhash provider is not a monetary trust anchor. Amount, destination,
+and Memo all come from the reviewed `finalize_intent` response, Phantom shows
+and signs those fixed instructions, and `confirm_funding` independently reads
+the chain and revalidates them. A malicious or unavailable blockhash provider
+can make the transaction fail or expire, but cannot redirect the transfer.
+A provider failure or rate limit is shown immediately with an explicit manual
 retry button—there is no silent retry consuming the deadline. Phantom performs
 the one `signAndSendTransaction`; the page then displays the transaction
 signature for `confirm_funding`.
