@@ -1,0 +1,2 @@
+# Preserve the reviewed bytes used by the signing page's local SRI check.
+web/signing-page/vendor/solana-web3-1.98.4.iife.min.js binary
