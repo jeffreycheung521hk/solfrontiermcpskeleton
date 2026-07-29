@@ -77,7 +77,8 @@ Phase 2 第一切片 `propose_intent`、第二切片 `finalize_intent` 已完成
 - 體積是一級關注:release profile 已設 `opt-level="z"` / `lto="fat"` / `panic="abort"`。新增依賴前先問「會拖進多大的樹」;定期 `cargo bloat --release --crates`。
 - 依賴收窄的 TODO 標記在根 `Cargo.toml`(tokio features、pubsub-client、token-2022)— 動它們時先 grep 用途。
 - stdio server 的 stdout 專屬 JSON-RPC:**所有日誌走 stderr**(已在 main.rs 設定,勿改)。
-- 格式化只對受影響 package 執行 `cargo fmt -p solfrontier-mcp` 與 `cargo fmt -p claw-protocols`,永不使用 `cargo fmt --all`;每個 commit 前必須跑 `git diff --exit-code -- crates/types crates/observability crates/state-store crates/solana-core crates/wallet-engine crates/risk-engine`,確認六個凍結核心 crate 零 diff。
+- 格式化只對受影響的**非凍結** package 執行 `cargo fmt -p <package>`,永不使用 `cargo fmt --all`;CI 以「workspace 全部成員減去六個凍結 package」動態導出 fmt 檢查範圍,新 crate 會自動納入。每個 commit 前必須跑 `git diff --exit-code -- crates/types crates/observability crates/state-store crates/solana-core crates/wallet-engine crates/risk-engine`,確認六個凍結核心 crate 零 diff。
+- PR 合併前必須以 GitHub Actions `gate` 全綠為權威證據(PR #6):`Windows validate` 負責 fmt/check/test,其成功後 `Windows release artifact` 才做 release build 並上傳可下載 binary。基於本機磁碟、MSVC linker 與 OpenSSL 環境不穩定的實測,本機不再負責全量 gate;只保留受影響 package 的 fmt 與 `cargo check` 級輕量預檢,不得以本機未跑全量測試為由繞過或取代 CI。
 - 大型搬移遵守舊 DEBT.md 的 PC-1/PC-2/PC-3(路徑審計;一 PR 一主題、不混邏輯改動;由低風險到高風險)。
 - 測試命名用語意名,不要沿用舊 repo 的 prompt-session 前綴(p1_/n6_/w5h_)。
 

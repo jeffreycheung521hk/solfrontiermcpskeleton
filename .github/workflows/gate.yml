@@ -1,0 +1,182 @@
+name: gate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A push to an open PR emits both push and pull_request events. Use the
+  # shared head branch name so the newer run cancels the duplicate cold build.
+  group: gate-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Windows validate
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Rust build inputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-validate
+          cache-on-failure: true
+
+      - name: Guard frozen core crates
+        shell: pwsh
+        run: |
+          $defaultBranch = "${{ github.event.repository.default_branch }}"
+          git fetch --no-tags origin $defaultBranch
+
+          if ("${{ github.event_name }}" -eq "pull_request") {
+            $baseCandidate = "${{ github.event.pull_request.base.sha }}"
+          } elseif (
+            "${{ github.ref_name }}" -eq $defaultBranch -and
+            "${{ github.event.before }}" -notmatch "^0+$"
+          ) {
+            $baseCandidate = "${{ github.event.before }}"
+          } else {
+            $baseCandidate = "origin/$defaultBranch"
+          }
+
+          $mergeBase = (git merge-base HEAD $baseCandidate).Trim()
+          if ([string]::IsNullOrWhiteSpace($mergeBase)) {
+            throw "Unable to resolve a merge-base for the frozen-core guard."
+          }
+
+          Write-Host "Frozen-core comparison base: $mergeBase"
+          git diff --name-only $mergeBase HEAD -- `
+            crates/types `
+            crates/observability `
+            crates/state-store `
+            crates/solana-core `
+            crates/wallet-engine `
+            crates/risk-engine
+          git diff --exit-code $mergeBase HEAD -- `
+            crates/types `
+            crates/observability `
+            crates/state-store `
+            crates/solana-core `
+            crates/wallet-engine `
+            crates/risk-engine
+          if ($LASTEXITCODE -ne 0) {
+            throw "Frozen core crate changes are not allowed in this PR."
+          }
+
+      - name: Check formatting outside the frozen core
+        # The frozen crates predate this repo's rustfmt baseline. They are
+        # protected by the merge-base guard above and must not be reformatted.
+        shell: pwsh
+        run: |
+          $frozenPackages = @(
+            "claw-types",
+            "claw-observability",
+            "claw-state-store",
+            "claw-solana-core",
+            "claw-wallet-engine",
+            "claw-risk-engine"
+          )
+
+          $metadata = cargo metadata --format-version 1 --no-deps |
+            ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) {
+            throw "cargo metadata failed."
+          }
+
+          $workspaceIds = @($metadata.workspace_members)
+          $workspacePackages = @(
+            $metadata.packages |
+              Where-Object { $_.id -in $workspaceIds }
+          )
+          $presentFrozen = @(
+            $workspacePackages |
+              Where-Object { $_.name -in $frozenPackages }
+          )
+          if ($presentFrozen.Count -ne $frozenPackages.Count) {
+            throw "Frozen package exclusion list no longer matches the workspace."
+          }
+
+          $mutablePackages = @(
+            $workspacePackages |
+              Where-Object { $_.name -notin $frozenPackages } |
+              Sort-Object name
+          )
+          if ($mutablePackages.Count -eq 0) {
+            throw "No non-frozen workspace packages found."
+          }
+
+          $fmtArgs = @("fmt", "--check")
+          foreach ($package in $mutablePackages) {
+            $fmtArgs += @("-p", $package.name)
+          }
+
+          Write-Host "cargo $($fmtArgs -join ' ')"
+          & cargo @fmtArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "Formatting check failed."
+          }
+
+      - name: Check workspace
+        run: cargo check --workspace
+
+      - name: Test workspace
+        run: cargo test --workspace
+
+  release-artifact:
+    name: Windows release artifact
+    needs: validate
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache release build inputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-release
+          cache-on-failure: true
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Report release size and checksum
+        shell: pwsh
+        run: |
+          $binary = Get-Item -LiteralPath target/release/solfrontier-mcp.exe
+          Write-Host "Release binary bytes: $($binary.Length)"
+          Get-FileHash -LiteralPath $binary.FullName -Algorithm SHA256
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: solfrontier-mcp-windows-${{ github.sha }}
+          path: target/release/solfrontier-mcp.exe
+          if-no-files-found: error
+          retention-days: 14
