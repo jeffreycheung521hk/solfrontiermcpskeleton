@@ -26,7 +26,8 @@ SolFrontier(前身 ClawSolana / Solfrontier2026)的 MCP 重構版:一個 policy-
 
 | 位置 | 狀態 | 說明 |
 |---|---|---|
-| `crates/types` `observability` `state-store` `solana-core` `wallet-engine` `risk-engine` | **原封搬入,不動邊界** | 來自 Solfrontier2026,是 mainnet proof 的信任錨 |
+| `crates/observability` `crates/solana-core` `crates/wallet-engine` `crates/risk-engine` | **原封搬入,不動邊界** | 四個未修訂的 Solfrontier2026 mainnet-proof 信任錨 |
+| `crates/types` `crates/state-store` | **公開修訂後重新凍結** | [PR #9](https://github.com/jeffreycheung521hk/solfrontiermcpskeleton/pull/9):types append-only 加 schema v2 並以 v1 golden hashes 證明舊指紋不變;state-store 只加無約束 TEXT action parser/round-trip,無 DB migration |
 | `bins/solfrontier-mcp` | MCP 入口 | rmcp stdio server;負責 tools、transport、runtime/config 與後端協調 glue,純 protocol logic 下沉 `crates/protocols` |
 | `web/signing-page` | Phase 2 靜態頁 | 單一 HTML 入口 + 本地 vendored JS 的 build-free Phantom 入金目錄;零後端接觸、簽名時不下載外部託管程式碼,由使用者自行以只綁 `127.0.0.1` 且只公開該目錄的靜態伺服器啟動;MCP binary 不開 HTTP port、不自動開瀏覽器 |
 | `crates/protocols/` | Phase 3 進行中 | 純 Jupiter/Solend wire types、decoders 與 unsigned builders;不得依賴 approval/pending state、DB、network、signing 或 submission |
@@ -43,9 +44,10 @@ Phase 2 已於 2026-07-29 以 0.1 USDC 完成 Solana mainnet 全流程驗收，
 `confirmed` commitment 的殘餘風險說明見
 `docs/phase2-mainnet-acceptance.md`。
 
-Phase 3 第一切片正在 `feat/phase3-protocols` 建立純 `claw-protocols`
-邊界,搬入 Jupiter/Solend 的 wire types、decoder 與通過純度審計的
-unsigned builders;MCP bin 只改引用路徑,不在搬遷 PR 混入行為改動。
+Phase 3 的 protocols 與 reserve decoder 搬遷已完成。PR #9 正以公開、
+append-only 修訂為 canonical WatchRule 加入 `SolendDeposit`;此 PR 只
+建立 schema 與讀寫相容性,不讓 finalize 開始產出新 action,也不加入
+executor。
 
 Phase 1 已完成:`get_quote`、`get_position`、`get_intent_status` 三個唯讀 tools 已分別接上 Jupiter、Solana RPC/Solend 與 state-store 真實後端,並通過 stdio MCP 驗證。
 
@@ -77,12 +79,24 @@ Phase 2 第一切片 `propose_intent`、第二切片 `finalize_intent` 已完成
 - 體積是一級關注:release profile 已設 `opt-level="z"` / `lto="fat"` / `panic="abort"`。新增依賴前先問「會拖進多大的樹」;定期 `cargo bloat --release --crates`。
 - 依賴收窄的 TODO 標記在根 `Cargo.toml`(tokio features、pubsub-client、token-2022)— 動它們時先 grep 用途。
 - stdio server 的 stdout 專屬 JSON-RPC:**所有日誌走 stderr**(已在 main.rs 設定,勿改)。
-- 格式化只對受影響的**非凍結** package 執行 `cargo fmt -p <package>`,永不使用 `cargo fmt --all`;CI 以「workspace 全部成員減去六個凍結 package」動態導出 fmt 檢查範圍,新 crate 會自動納入。每個 commit 前必須跑 `git diff --exit-code -- crates/types crates/observability crates/state-store crates/solana-core crates/wallet-engine crates/risk-engine`,確認六個凍結核心 crate 零 diff。
+- 格式化只對受影響的**非 legacy-fmt** package 執行 `cargo fmt -p <package>`,永不使用 `cargo fmt --all`;CI 以「workspace 全部成員減去六個 legacy-fmt package」動態導出 fmt 檢查範圍,新 crate 會自動納入。一般 PR 每個 commit 前必須跑 `git diff --exit-code -- crates/types crates/observability crates/state-store crates/solana-core crates/wallet-engine crates/risk-engine`,確認六個核心 crate 零 diff。[PR #9](https://github.com/jeffreycheung521hk/solfrontiermcpskeleton/pull/9) 是一次性公開例外,只允許列明的 types/state-store schema diff;該 PR 每個 commit 仍須證明其餘四個核心 crate 零 diff,且 `bins/solfrontier-mcp/src/finalize.rs` 除顯式釘住 v1 的相容性護欄外不得改變寫入行為。PR-B 恢復 guard 後六者重新凍結。
 - PR 合併前必須以 GitHub Actions `gate` 全綠為權威證據(PR #6):`Windows validate` 負責 fmt/check/test,其成功後 `Windows release artifact` 才做 release build 並上傳可下載 binary。基於本機磁碟、MSVC linker 與 OpenSSL 環境不穩定的實測,本機不再負責全量 gate;只保留受影響 package 的 fmt 與 `cargo check` 級輕量預檢,不得以本機未跑全量測試為由繞過或取代 CI。
 - 大型搬移遵守舊 DEBT.md 的 PC-1/PC-2/PC-3(路徑審計;一 PR 一主題、不混邏輯改動;由低風險到高風險)。
 - 測試命名用語意名,不要沿用舊 repo 的 prompt-session 前綴(p1_/n6_/w5h_)。
 
 ## 技術債
+
+### DEBT-P3-SCHEMA-1:鏈上 Authorization PDA 尚不支援 SolendDeposit
+
+- **現況:**`ActionSpec` 的 Borsh tag 是 `withdraw=0 / Jupiter=1 / deposit=2`;這與 `WatchRuleActionType::to_u8()` 的鏈下 routing/audit 值 `1 / 2 / 3` 是兩個命名空間。已部署的 `clawsol-authority` 只接受 action byte 1/2,未知值 fail closed,Solend CPI builder 亦仍是 withdraw-only。因此 `SolendDeposit=3` 目前絕不可宣稱為已部署 PDA grant。
+- **目前邊界:**Phase 3 規劃的 controlled-wallet direct rail 不呼叫 `clawsol-authority` 或 Authorization PDA,所以 PR #9 可只建立鏈下 canonical identity。舊 W5i 雖 import `stage2_executor` 的五個示範常數,但沒有走 `validate_request_shape` 或該授權執行路徑。
+- **觸發條件:**若日後任何 Solend deposit 改走 Authorization PDA / `ExecuteAction` 授權路徑,必須先更新、重新部署並獨立審計鏈上程式與 Solend CPI builder,再升 watch-rule schema version;完成前該路徑必須 fail closed。
+
+### DEBT-P3-SCHEMA-2:SolendDeposit decimals 是執行時推導值
+
+- **現況:**`input_mint` 進 canonical 指紋,但 decimals 不進。`input_mint` 不在 Solend deposit 的 14 個 account meta 中,其證據等級是間接的:runtime 必須要求 `action.input_mint == decoded reserve liquidity mint == source ATA mint`,核對 ATA owner 與 pre/post token balance,並在目前 USDC-only rail fail closed 要求 `decimals == 6`。
+- **理由:**固定 USDC rail 的 decimals 可由 mint/reserve 真實狀態重算,避免在 action 重複一個可驗證的衍生值;這不放寬 ATA、mint、owner 或 amount 的三方等值檢查。
+- **觸發條件:**允許非 USDC mint、可配置 decimals 或 Token-2022 前,必須重新評審 decimals 與 token program 是否要進 canonical 指紋,並按結論升 schema version;完成前不得擴大 mint 白名單。
 
 ### DEBT-MCP-1（已關閉）:canonical hash 公開反查缺口
 

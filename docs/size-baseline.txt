@@ -552,3 +552,21 @@ replaces a bin-side funding-row reconstruction helper with a repository
 readback; the 512-byte reduction is exactly one Windows PE FileAlignment unit.
 `cargo-bloat` was not rerun locally, so no local or estimated analysis-build
 number is mixed into this CI series.
+
+=== after canonical SolendDeposit schema amendment (Windows CI, 2026-07-30) ===
+Gate run: https://github.com/jeffreycheung521hk/solfrontiermcpskeleton/actions/runs/30541614231
+Artifact: https://github.com/jeffreycheung521hk/solfrontiermcpskeleton/actions/runs/30541614231/artifacts/8759072240
+Binary: target\release\solfrontier-mcp.exe
+Windows CI release size: 5265408 bytes (5142.0KiB, 5.021484MiB)
+Previous Windows CI gate baseline: 5258752 bytes (5135.5KiB, 5.015137MiB)
+Change: +6656 bytes (+6.5KiB, +0.13%)
+Binary SHA-256: E937EE5F8893B4A6BC5689B79F099CC34E692DF7C9E1C5B219AE7174B1777865
+
+This measurement comes from PR #9's first complete Windows gate after both
+ordered schema commits were pushed. It uses the same Rust 1.97.1 Windows runner
+series and normal `cargo build --release` profile as the previous CI baseline.
+The live binary now recognizes the new action in state-store deserialization and
+status projection, while finalize remains explicitly pinned to its v1 carrier
+until PR-C. The 6.5KiB increase is 13 Windows PE FileAlignment units. No local
+or estimated release number is mixed into this CI series; the documentation-only
+follow-up is subjected to a second full gate before merge.

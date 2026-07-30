@@ -41,7 +41,7 @@ jobs:
           shared-key: windows-validate
           cache-on-failure: true
 
-      - name: Guard frozen core crates
+      - name: Guard unamended frozen core crates
         shell: pwsh
         run: |
           $defaultBranch = "${{ github.event.repository.default_branch }}"
@@ -63,31 +63,30 @@ jobs:
             throw "Unable to resolve a merge-base for the frozen-core guard."
           }
 
-          Write-Host "Frozen-core comparison base: $mergeBase"
+          # PR #9 is a publicly reviewed, append-only amendment to
+          # crates/types and crates/state-store. The other four trust anchors
+          # remain protected here; PR-B restores all six paths.
+          Write-Host "Unamended frozen-core comparison base: $mergeBase"
           git diff --name-only $mergeBase HEAD -- `
-            crates/types `
             crates/observability `
-            crates/state-store `
             crates/solana-core `
             crates/wallet-engine `
             crates/risk-engine
           git diff --exit-code $mergeBase HEAD -- `
-            crates/types `
             crates/observability `
-            crates/state-store `
             crates/solana-core `
             crates/wallet-engine `
             crates/risk-engine
           if ($LASTEXITCODE -ne 0) {
-            throw "Frozen core crate changes are not allowed in this PR."
+            throw "Unamended frozen core crate changes are not allowed in this PR."
           }
 
-      - name: Check formatting outside the frozen core
-        # The frozen crates predate this repo's rustfmt baseline. They are
-        # protected by the merge-base guard above and must not be reformatted.
+      - name: Check formatting outside the legacy baseline
+        # These six crates predate this repo's rustfmt baseline. This exclusion
+        # is independent of the temporary PR #9 frozen-diff exception.
         shell: pwsh
         run: |
-          $frozenPackages = @(
+          $legacyFmtExcludedPackages = @(
             "claw-types",
             "claw-observability",
             "claw-state-store",
@@ -107,17 +106,17 @@ jobs:
             $metadata.packages |
               Where-Object { $_.id -in $workspaceIds }
           )
-          $presentFrozen = @(
+          $presentLegacyFmtExcluded = @(
             $workspacePackages |
-              Where-Object { $_.name -in $frozenPackages }
+              Where-Object { $_.name -in $legacyFmtExcludedPackages }
           )
-          if ($presentFrozen.Count -ne $frozenPackages.Count) {
-            throw "Frozen package exclusion list no longer matches the workspace."
+          if ($presentLegacyFmtExcluded.Count -ne $legacyFmtExcludedPackages.Count) {
+            throw "Legacy fmt exclusion list no longer matches the workspace."
           }
 
           $mutablePackages = @(
             $workspacePackages |
-              Where-Object { $_.name -notin $frozenPackages } |
+              Where-Object { $_.name -notin $legacyFmtExcludedPackages } |
               Sort-Object name
           )
           if ($mutablePackages.Count -eq 0) {
