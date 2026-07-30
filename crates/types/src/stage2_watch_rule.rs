@@ -52,11 +52,17 @@ use thiserror::Error;
 
 use crate::canonical_intent::PubkeyBytes;
 
-/// Stage 2 schema version, the FIRST byte of every canonical rule.
+/// Frozen Stage 2 watch-rule schema v1.
+///
+/// Legacy fixtures and consumers that must reproduce v1 bytes should pin this
+/// constant instead of following [`STAGE2_WATCH_RULE_SCHEMA_VERSION`].
+pub const STAGE2_WATCH_RULE_SCHEMA_V1: u8 = 1;
+
+/// Latest Stage 2 schema version, the FIRST byte of every canonical rule.
 /// A future schema change MUST bump this; any consumer that pins the
 /// old version sees a hash mismatch and fails closed instead of
 /// silently parsing newer-shaped bytes.
-pub const STAGE2_WATCH_RULE_SCHEMA_VERSION: u8 = 1;
+pub const STAGE2_WATCH_RULE_SCHEMA_VERSION: u8 = STAGE2_WATCH_RULE_SCHEMA_V1;
 
 /// Upper bound on `conditions.len()`. Keeps Borsh-decoded sizes
 /// predictable and gives the on-chain comparator a small fixed
@@ -602,7 +608,7 @@ mod tests {
 
     fn fixture_a_solend_apr_below_10() -> WatchRule {
         WatchRule {
-            schema_version: STAGE2_WATCH_RULE_SCHEMA_VERSION,
+            schema_version: STAGE2_WATCH_RULE_SCHEMA_V1,
             rule_id: FIXTURE_RULE_ID,
             user: pk_from_str(TEST_USER),
             executor: pk(0x02),       // synthetic delegated executor
@@ -640,7 +646,7 @@ mod tests {
 
     fn fixture_b_basket_buy_sol() -> WatchRule {
         WatchRule {
-            schema_version: STAGE2_WATCH_RULE_SCHEMA_VERSION,
+            schema_version: STAGE2_WATCH_RULE_SCHEMA_V1,
             rule_id: FIXTURE_RULE_ID,
             user: pk_from_str(TEST_USER),
             executor: pk(0x02),
@@ -742,7 +748,7 @@ mod tests {
     #[test]
     fn schema_version_is_first_canonical_byte() {
         let bytes = canonical_rule_bytes(&fixture_a_solend_apr_below_10());
-        assert_eq!(bytes[0], STAGE2_WATCH_RULE_SCHEMA_VERSION);
+        assert_eq!(bytes[0], STAGE2_WATCH_RULE_SCHEMA_V1);
     }
 
     // ── Mutation tests — every load-bearing field is hash-included ──────
@@ -1266,7 +1272,7 @@ mod tests {
             let hash = canonical_rule_hash(&rule);
             let json = serde_json::to_string_pretty(&rule).unwrap();
             println!("\n=== fixture: {label} ===");
-            println!("schema_version = {STAGE2_WATCH_RULE_SCHEMA_VERSION}");
+            println!("schema_version = {}", rule.schema_version);
             println!("canonical_json:\n{json}");
             println!("canonical_bytes_hex ({} bytes):", bytes.len());
             println!("  {}", fmt_hex(&bytes));
