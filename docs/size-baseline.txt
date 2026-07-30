@@ -535,3 +535,20 @@ and golden tests but no live release call site; fat LTO therefore leaves the
 shipping PE size unchanged. `cargo-bloat` was not rerun locally after the gate
 moved to CI, so this entry deliberately reports the reproducible CI artifact
 measurement rather than mixing it with the older local analysis-build series.
+
+=== after persisted funding timestamp authority (Windows CI, 2026-07-30) ===
+Gate run: https://github.com/jeffreycheung521hk/solfrontiermcpskeleton/actions/runs/30500084602
+Artifact: https://github.com/jeffreycheung521hk/solfrontiermcpskeleton/actions/runs/30500084602/artifacts/8743226044
+Binary: target\release\solfrontier-mcp.exe
+Windows CI release size: 5258752 bytes (5135.5KiB, 5.015137MiB)
+Previous Windows CI gate baseline: 5259264 bytes (5136.0KiB, 5.015625MiB)
+Change: -512 bytes (-0.5KiB, -0.01%)
+Binary SHA-256: D1E9C19DEC268299D5DC68CDE8D22FE3D38833119E0A71C9A1CB86F727D4B8E5
+
+This measurement comes from PR #8's first Windows gate, after the code-only
+commit was pushed. It uses the same Rust 1.97.1 Windows runner series and normal
+`cargo build --release` profile as the previous CI baseline. The authority fix
+replaces a bin-side funding-row reconstruction helper with a repository
+readback; the 512-byte reduction is exactly one Windows PE FileAlignment unit.
+`cargo-bloat` was not rerun locally, so no local or estimated analysis-build
+number is mixed into this CI series.

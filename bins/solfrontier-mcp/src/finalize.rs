@@ -21,7 +21,8 @@
 //! `funding_window_seconds` is descriptive metadata derived from
 //! `FUNDING_WINDOW_MS`. Any signing-page countdown MUST use the absolute
 //! `expires_at_ms` deadline, never reconstruct a deadline from the window
-//! length.
+//! length. The funding row's persisted `created_at_ms` / `expires_at_ms` are
+//! the sole wall-clock authority for the response and signing-page payload.
 
 use std::{
     str::FromStr,
@@ -209,9 +210,10 @@ where
         }
     }
 
-    // Preserve the predecessor's timestamp boundary: finalize time is captured
-    // after consume and wallet resolution, immediately before market reads.
-    let finalize_started_at_ms = clock.now_ms();
+    // Preserve the predecessor's pre-market clock sample so this authority fix
+    // does not shift the persisted deadline's generation order or value. The
+    // sample is deliberately not a response deadline source.
+    let _finalize_started_at_ms = clock.now_ms();
     let snapshot = match market_source.fetch_snapshot().await {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -265,9 +267,10 @@ where
         }
     }
 
-    // Preserve the predecessor's timestamp discrepancy literally: this later
-    // timestamp is stored in the main DB, while the response below is rooted
-    // at `finalize_started_at_ms`.
+    // Preserve the predecessor's DB deadline semantics: the 180-second funding
+    // window starts when the funding row is persisted, after market reads.
+    // Unlike the predecessor DTO, every response below reads its timestamps
+    // from that authoritative row.
     let persisted_created_at_ms = clock.now_ms();
     let persisted_expires_at_ms = persisted_created_at_ms.saturating_add(FUNDING_WINDOW_MS);
     let new_intent = NewW5hFundingIntent {
@@ -309,17 +312,8 @@ where
         }));
     }
 
-    // A fresh insert retains the predecessor's response/DB timestamp skew.
-    // Collision recovery, however, must surface the actual existing row rather
-    // than inventing a fresh deadline for an older authoritative intent.
-    let (response_created_at_ms, response_expires_at_ms) = if reused_existing_intent {
-        (current.created_at_ms, current.expires_at_ms)
-    } else {
-        (
-            finalize_started_at_ms,
-            finalize_started_at_ms.saturating_add(FUNDING_WINDOW_MS),
-        )
-    };
+    let response_created_at_ms = current.created_at_ms;
+    let response_expires_at_ms = current.expires_at_ms;
     let memo = format!("claw:w5h:{intent_id}:{rule_hash}");
     let request_wallet_matches_persisted = current.user_wallet == user_wallet.to_string();
     if reused_existing_intent && !request_wallet_matches_persisted {
@@ -332,21 +326,24 @@ where
             "draft_consumed": true,
         }));
     }
-    if reused_existing_intent
-        && (current.status != W5hIntentStatus::FundingRequired
-            || current.expires_at_ms <= finalize_started_at_ms)
+    // Re-check immediately before producing an actionable handoff so a market
+    // read cannot bridge an existing intent across its persisted deadline.
+    // The endpoint is inclusive: now >= expires_at_ms is expired.
+    let actionability_checked_at_ms = clock.now_ms();
+    if current.status != W5hIntentStatus::FundingRequired
+        || current.expires_at_ms <= actionability_checked_at_ms
     {
-        let reason = if current.expires_at_ms <= finalize_started_at_ms {
-            "the existing funding deadline has elapsed; no funding instructions were issued"
+        let reason = if current.expires_at_ms <= actionability_checked_at_ms {
+            "the persisted funding deadline has elapsed; no funding instructions were issued"
         } else {
-            "the existing intent has already advanced beyond funding_required; no funding instructions were issued"
+            "the persisted intent has already advanced beyond funding_required; no funding instructions were issued"
         };
         return Ok(json!({
             "status": current.status.as_str(),
             "draft_id": params.draft_id,
             "intent_id": intent_id,
             "rule_hash": rule_hash,
-            "reused_existing_intent": true,
+            "reused_existing_intent": reused_existing_intent,
             "funding_actionable": false,
             "created_at_ms": current.created_at_ms,
             "expires_at_ms": current.expires_at_ms,
@@ -546,7 +543,14 @@ async fn persist_funding_with_legacy_recovery(
     fresh: &NewW5hFundingIntent,
 ) -> Result<FundingPersistOutcome, FinalizeInternalError> {
     match repository.insert(fresh).await {
-        Ok(()) => Ok(FundingPersistOutcome::Inserted(fresh_funding_row(fresh))),
+        Ok(()) => match repository.get(&fresh.intent_id).await {
+            Ok(Some(persisted)) => Ok(FundingPersistOutcome::Inserted(persisted)),
+            Ok(None) => Err(FinalizeInternalError::StateStore(StoreError::NotFound {
+                entity: "stage2_w5h_funding_intents".to_owned(),
+                id: fresh.intent_id.clone(),
+            })),
+            Err(read_error) => Err(FinalizeInternalError::StateStore(read_error)),
+        },
         Err(insert_error) => match repository.get(&fresh.intent_id).await {
             Ok(Some(existing)) => Ok(FundingPersistOutcome::Existing(existing)),
             Ok(None) => Err(FinalizeInternalError::StateStore(insert_error)),
@@ -596,31 +600,6 @@ fn funding_row_matches_identity(
     )
     .to_string()
         == funding.user_usdc_ata
-}
-
-fn fresh_funding_row(fresh: &NewW5hFundingIntent) -> W5hFundingIntent {
-    W5hFundingIntent {
-        intent_id: fresh.intent_id.clone(),
-        rule_id_hex: fresh.rule_id_hex.clone(),
-        canonical_rule_hash_hex: fresh.canonical_rule_hash_hex.clone(),
-        user_wallet: fresh.user_wallet.clone(),
-        user_usdc_ata: fresh.user_usdc_ata.clone(),
-        controlled_wallet: fresh.controlled_wallet.clone(),
-        controlled_usdc_ata: fresh.controlled_usdc_ata.clone(),
-        amount_raw: fresh.amount_raw,
-        threshold_bps: fresh.threshold_bps,
-        save_display_apy_bps_at_creation: fresh.save_display_apy_bps_at_creation,
-        native_onchain_apr_bps_at_creation: fresh.native_onchain_apr_bps_at_creation,
-        created_at_ms: fresh.created_at_ms,
-        expires_at_ms: fresh.expires_at_ms,
-        status: W5hIntentStatus::FundingRequired,
-        funding_signature: None,
-        funding_finalized_slot: None,
-        execution_signature: None,
-        refund_signature: None,
-        last_error: None,
-        updated_at_ms: fresh.created_at_ms,
-    }
 }
 
 fn is_v4_uuid(value: &str) -> bool {
@@ -1243,11 +1222,11 @@ mod tests {
         );
         assert_eq!(
             response["created_at_ms"],
-            FINALIZE_STARTED_AT_MS + CLOCK_STEP_MS
+            FINALIZE_STARTED_AT_MS + 3 * CLOCK_STEP_MS
         );
         assert_eq!(
             response["expires_at_ms"],
-            FINALIZE_STARTED_AT_MS + CLOCK_STEP_MS + FUNDING_WINDOW_MS
+            FINALIZE_STARTED_AT_MS + 3 * CLOCK_STEP_MS + FUNDING_WINDOW_MS
         );
         assert_eq!(response["reused_existing_intent"], false);
         assert_eq!(response["funding"]["amount_raw"], "500000");
@@ -1295,7 +1274,7 @@ mod tests {
         assert_eq!(signing_payload["funding"]["decimals"], 6);
         assert_eq!(
             signing_payload["funding"]["expires_at_ms"],
-            FINALIZE_STARTED_AT_MS + CLOCK_STEP_MS + FUNDING_WINDOW_MS
+            FINALIZE_STARTED_AT_MS + 3 * CLOCK_STEP_MS + FUNDING_WINDOW_MS
         );
         assert_eq!(signing_payload["funding"]["user_wallet"], TEST_USER_WALLET);
         assert_eq!(market.calls(), 1);
@@ -1342,12 +1321,21 @@ mod tests {
         assert!(stored_funding.execution_signature.is_none());
         assert!(stored_funding.refund_signature.is_none());
         assert!(stored_funding.last_error.is_none());
-        assert_ne!(
-            stored_funding.created_at_ms,
-            response["created_at_ms"]
-                .as_i64()
-                .expect("response timestamp"),
-            "the predecessor's persisted/response timestamp discrepancy is intentional"
+        assert_eq!(
+            response["created_at_ms"], stored_funding.created_at_ms,
+            "the persisted funding row is the sole created-at authority"
+        );
+        assert_eq!(
+            response["expires_at_ms"], stored_funding.expires_at_ms,
+            "the response deadline must equal the persisted funding deadline"
+        );
+        assert_eq!(
+            response["funding"]["expires_at_ms"], stored_funding.expires_at_ms,
+            "the nested funding instruction must use the persisted deadline"
+        );
+        assert_eq!(
+            signing_payload["funding"]["expires_at_ms"], stored_funding.expires_at_ms,
+            "the signing URL must carry the persisted deadline verbatim"
         );
 
         assert_eq!(
@@ -1464,6 +1452,15 @@ mod tests {
             retyped_response["expires_at_ms"], funding.expires_at_ms,
             "collision recovery must expose the authoritative deadline"
         );
+        assert_eq!(
+            retyped_response["funding"]["expires_at_ms"], funding.expires_at_ms,
+            "collision funding instructions must use the persisted deadline"
+        );
+        assert_eq!(
+            signing_page_payload(&retyped_response)["funding"]["expires_at_ms"],
+            funding.expires_at_ms,
+            "collision signing URLs must carry the persisted deadline verbatim"
+        );
 
         let wallet_conflict = finalize_intent_json(
             &different_wallet,
@@ -1487,7 +1484,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expired_existing_intent_never_gets_a_fresh_funding_deadline() {
+    async fn existing_intent_at_exact_deadline_is_not_actionable() {
         let (_file, db, watch_rules, funding_intents, sidecar) = test_store().await;
         let first = params_with_id(FIRST_DRAFT_ID);
         let second = params_with_id(SECOND_DRAFT_ID);
@@ -1514,7 +1511,9 @@ mod tests {
             .expect("persisted funding row")
             .expires_at_ms;
 
-        let expired_clock = StepClock::new(authoritative_expiry, CLOCK_STEP_MS);
+        // Hold every clock read exactly on the persisted endpoint. The final
+        // actionability check must treat now == expires_at_ms as expired.
+        let expired_clock = StepClock::new(authoritative_expiry, 0);
         let expired_response = finalize_intent_json(
             &second,
             Some(&market),
@@ -1533,6 +1532,10 @@ mod tests {
         assert!(
             expired_response.get("funding").is_none(),
             "expired existing intent must not expose signing instructions"
+        );
+        assert!(
+            expired_response.get("signing").is_none(),
+            "an expired intent must not invite a signature"
         );
         assert!(
             expired_response.get("signing_page_url").is_none(),
