@@ -345,6 +345,7 @@ fn action_mints(rule: &StoredWatchRule) -> (Option<String>, Option<String>) {
             output_mint,
             ..
         } => (Some(input_mint.to_base58()), Some(output_mint.to_base58())),
+        ActionSpec::SolendDeposit { input_mint, .. } => (Some(input_mint.to_base58()), None),
         ActionSpec::SolendWithdrawAllDelegated { .. } => (None, None),
     }
 }

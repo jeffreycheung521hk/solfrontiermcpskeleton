@@ -712,6 +712,7 @@ fn parse_action_type(s: &str) -> Result<WatchRuleActionType, StoreError> {
             Ok(WatchRuleActionType::SolendWithdrawAllDelegated)
         }
         "jupiter_buy_sol_with_usdc" => Ok(WatchRuleActionType::JupiterBuySolWithUsdc),
+        "solend_deposit" => Ok(WatchRuleActionType::SolendDeposit),
         other => Err(StoreError::IntegrityCheckFailed(format!(
             "unknown action_type '{other}'"
         ))),
@@ -824,7 +825,8 @@ mod tests {
     use claw_types::canonical_intent::PubkeyBytes;
     use claw_types::stage2_watch_rule::{
         ActionSpec, BoundMode, Comparison, Condition, JupiterApiVersion, RateKind,
-        VerificationLevel, WithdrawMode, STAGE2_WATCH_RULE_SCHEMA_VERSION,
+        VerificationLevel, WithdrawMode, STAGE2_WATCH_RULE_SCHEMA_V1,
+        STAGE2_WATCH_RULE_SCHEMA_V2,
     };
 
     async fn test_repo() -> (Database, Stage2WatchRuleRepository) {
@@ -847,6 +849,9 @@ mod tests {
     const FIXTURE_RULE_ID_B: [u8; 16] = [
         0x52, 0x55, 0x4c, 0x45, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02,
     ];
+    const FIXTURE_RULE_ID_C: [u8; 16] = [
+        0x53, 0x4f, 0x4c, 0x44, 0x45, 0x50, 0x4f, 0x53, 0x49, 0x54, 0, 0, 0, 0, 0, 2,
+    ];
 
     const BTC_USD_FEED_ID: [u8; 32] = [
         0xe6, 0x2d, 0xf6, 0xc8, 0xb4, 0xa8, 0x5f, 0xe1, 0xa6, 0x7d, 0xb4, 0x4d, 0xc1,
@@ -867,6 +872,8 @@ mod tests {
     const SOLEND_USDC_RESERVE: &str = "BgxfHJDzm44T7XG68MYKx7YisTjZu73tVovyZSjJMpmw";
     const SOLEND_LENDING_MARKET: &str = "4UpD2fh7xH3VP9QQaXtsS1YY3bxzWhtfpks7FatyKvdY";
     const SOLEND_PROGRAM_ID: &str = "So1endDq2YkqhipRh3WViPa8hdiSpxWy6z3Z6tMCpAo";
+    const SOLEND_TARGET_OBLIGATION: &str = "BdFLjCcP9mCy557vNNGVbTUuvHxXsh8hc6jXzaPra1wN";
+    const CONTROLLED_WALLET: &str = "BPfDMmeMBmCbMC1rWh7hwigMBoKGBrKwXxSeUu9hhs5L";
     const TEST_USER: &str = "C4QQjzWxnJ5QFAbkzhQJ3wTzyX6nw1vyFvJwbPXJGPNW";
     const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
     const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
@@ -876,7 +883,7 @@ mod tests {
 
     fn fixture_a_solend_apr_below_10() -> WatchRule {
         WatchRule {
-            schema_version: STAGE2_WATCH_RULE_SCHEMA_VERSION,
+            schema_version: STAGE2_WATCH_RULE_SCHEMA_V1,
             rule_id: FIXTURE_RULE_ID_A,
             user: pk_from_str(TEST_USER),
             executor: pk(0x02),
@@ -912,7 +919,7 @@ mod tests {
 
     fn fixture_b_basket_buy_sol() -> WatchRule {
         WatchRule {
-            schema_version: STAGE2_WATCH_RULE_SCHEMA_VERSION,
+            schema_version: STAGE2_WATCH_RULE_SCHEMA_V1,
             rule_id: FIXTURE_RULE_ID_B,
             user: pk_from_str(TEST_USER),
             executor: pk(0x02),
@@ -972,6 +979,26 @@ mod tests {
         }
     }
 
+    fn fixture_c_solend_deposit() -> WatchRule {
+        let mut rule = fixture_a_solend_apr_below_10();
+        let controlled = pk_from_str(CONTROLLED_WALLET);
+        rule.schema_version = STAGE2_WATCH_RULE_SCHEMA_V2;
+        rule.rule_id = FIXTURE_RULE_ID_C;
+        rule.executor = controlled;
+        rule.delegated_wallet = controlled;
+        rule.action = ActionSpec::SolendDeposit {
+            target_obligation: pk_from_str(SOLEND_TARGET_OBLIGATION),
+            reserve_pubkey: pk_from_str(SOLEND_USDC_RESERVE),
+            lending_market: pk_from_str(SOLEND_LENDING_MARKET),
+            solend_program_id: pk_from_str(SOLEND_PROGRAM_ID),
+            input_mint: pk_from_str(USDC_MINT),
+            input_amount_raw: 500_000,
+        };
+        rule.max_input_amount_raw = 500_000;
+        rule.destination = controlled;
+        rule
+    }
+
     // ── Migration / table creation ──────────────────────────────────────
 
     #[tokio::test]
@@ -1020,6 +1047,19 @@ mod tests {
         assert_eq!(loaded.action_type, WatchRuleActionType::JupiterBuySolWithUsdc);
         assert_eq!(loaded.condition_logic, ConditionLogic::All);
         assert_eq!(loaded.rule.conditions.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn insert_and_get_roundtrip_v2_solend_deposit() {
+        let (_db, repo) = test_repo().await;
+        let rule = fixture_c_solend_deposit();
+        repo.insert(&rule).await.unwrap();
+        let loaded = repo.get(&rule.rule_id).await.unwrap().expect("row exists");
+        assert_eq!(loaded.rule, rule);
+        assert_eq!(loaded.rule.schema_version, STAGE2_WATCH_RULE_SCHEMA_V2);
+        assert_eq!(loaded.action_type, WatchRuleActionType::SolendDeposit);
+        assert_eq!(loaded.action_type.label(), "solend_deposit");
+        assert_eq!(loaded.canonical_rule_hash, canonical_rule_hash(&rule));
     }
 
     #[tokio::test]

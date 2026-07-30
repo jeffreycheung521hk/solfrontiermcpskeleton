@@ -35,7 +35,7 @@ use claw_state_store::{
 };
 use claw_types::{
     canonical_rule_hash, ActionSpec, Comparison, Condition, ConditionLogic, PubkeyBytes, RateKind,
-    WatchRule, WithdrawMode, STAGE2_WATCH_RULE_SCHEMA_VERSION,
+    WatchRule, WithdrawMode, STAGE2_WATCH_RULE_SCHEMA_V1,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -461,7 +461,10 @@ pub(crate) fn build_watch_rule(draft: &DraftIntent, last_checked_slot: u64) -> W
         .expect("hard-coded Solend program id must parse");
 
     WatchRule {
-        schema_version: STAGE2_WATCH_RULE_SCHEMA_VERSION,
+        // Compatibility pin: PR #9 introduces schema v2, but this legacy
+        // placeholder remains a v1 write until PR-C replaces it atomically
+        // with a canonical SolendDeposit action.
+        schema_version: STAGE2_WATCH_RULE_SCHEMA_V1,
         rule_id: derive_rule_id(draft.threshold_bps, draft.amount_raw, &controlled),
         user: controlled,
         executor: controlled,
@@ -814,7 +817,7 @@ mod tests {
         let lending_market =
             PubkeyBytes::from_base58(SOLEND_LENDING_MARKET_BS58).expect("pinned lending market");
         WatchRule {
-            schema_version: STAGE2_WATCH_RULE_SCHEMA_VERSION,
+            schema_version: STAGE2_WATCH_RULE_SCHEMA_V1,
             rule_id: [
                 0x32, 0x00, 0x00, 0x00, 0x20, 0xa1, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x9a, 0x62,
                 0xda, 0xce,

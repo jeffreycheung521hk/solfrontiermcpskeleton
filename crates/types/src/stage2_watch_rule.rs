@@ -58,11 +58,17 @@ use crate::canonical_intent::PubkeyBytes;
 /// constant instead of following [`STAGE2_WATCH_RULE_SCHEMA_VERSION`].
 pub const STAGE2_WATCH_RULE_SCHEMA_V1: u8 = 1;
 
+/// Stage 2 watch-rule schema v2.
+///
+/// V2 appends the canonical [`ActionSpec::SolendDeposit`] variant. Existing
+/// v1 rules remain valid and retain their original canonical bytes.
+pub const STAGE2_WATCH_RULE_SCHEMA_V2: u8 = 2;
+
 /// Latest Stage 2 schema version, the FIRST byte of every canonical rule.
 /// A future schema change MUST bump this; any consumer that pins the
 /// old version sees a hash mismatch and fails closed instead of
 /// silently parsing newer-shaped bytes.
-pub const STAGE2_WATCH_RULE_SCHEMA_VERSION: u8 = STAGE2_WATCH_RULE_SCHEMA_V1;
+pub const STAGE2_WATCH_RULE_SCHEMA_VERSION: u8 = STAGE2_WATCH_RULE_SCHEMA_V2;
 
 /// Upper bound on `conditions.len()`. Keeps Borsh-decoded sizes
 /// predictable and gives the on-chain comparator a small fixed
@@ -292,6 +298,22 @@ pub enum ActionSpec {
         max_accounts_hint: u8,
         require_pre_post_bracket: bool,
     },
+    /// Deposit an exact token amount into the Solend reserve for the
+    /// controlled wallet's canonical obligation.
+    ///
+    /// All six fields are canonical and therefore fingerprint-bound. At
+    /// execution time the reserve account must decode to the same lending
+    /// market and input mint; the derived source ATA must have that mint and
+    /// the delegated wallet as owner; and `input_amount_raw` must equal both
+    /// `WatchRule::max_input_amount_raw` and the persisted funding amount.
+    SolendDeposit {
+        target_obligation: PubkeyBytes,
+        reserve_pubkey: PubkeyBytes,
+        lending_market: PubkeyBytes,
+        solend_program_id: PubkeyBytes,
+        input_mint: PubkeyBytes,
+        input_amount_raw: u64,
+    },
 }
 
 impl ActionSpec {
@@ -303,6 +325,7 @@ impl ActionSpec {
             Self::JupiterBuySolWithUsdc { .. } => {
                 WatchRuleActionType::JupiterBuySolWithUsdc
             }
+            Self::SolendDeposit { .. } => WatchRuleActionType::SolendDeposit,
         }
     }
 }
@@ -316,6 +339,7 @@ impl ActionSpec {
 pub enum WatchRuleActionType {
     SolendWithdrawAllDelegated,
     JupiterBuySolWithUsdc,
+    SolendDeposit,
 }
 
 impl WatchRuleActionType {
@@ -323,17 +347,18 @@ impl WatchRuleActionType {
         match self {
             Self::SolendWithdrawAllDelegated => "solend_withdraw_all_delegated",
             Self::JupiterBuySolWithUsdc => "jupiter_buy_sol_with_usdc",
+            Self::SolendDeposit => "solend_deposit",
         }
     }
 
-    /// Stable on-chain discriminator value, used by the Stage 2
-    /// Authorization PDA's `allowed_action_type: u8` field.
+    /// Stable routing/audit discriminator.
     ///
     /// Values start at `1` so that the all-zero byte (a default-zeroed
-    /// PDA buffer) never aliases to a valid action type. The values
-    /// here are part of the on-chain wire shape and MUST NOT change
-    /// without a Stage 2 schema-version bump in
-    /// [`STAGE2_WATCH_RULE_SCHEMA_VERSION`].
+    /// buffer) never aliases to a valid action type. Values `1` and `2`
+    /// match the deployed Stage 2 Authorization PDA wire shape. Value `3`
+    /// is currently off-chain-only: the deployed program fails closed on it,
+    /// so a future PDA-authorized Solend deposit requires a program upgrade
+    /// and another schema-version review.
     ///
     /// This helper is independent of Borsh — the canonical rule hash
     /// is computed over the [`ActionSpec`] variant inside a
@@ -343,17 +368,17 @@ impl WatchRuleActionType {
         match self {
             Self::SolendWithdrawAllDelegated => 1,
             Self::JupiterBuySolWithUsdc => 2,
+            Self::SolendDeposit => 3,
         }
     }
 
-    /// Inverse of [`Self::to_u8`]. Returns `None` for any byte not in
-    /// `{1, 2}` so that the on-chain comparator can fail-closed on an
-    /// uninterpretable discriminator (zero-default, or a byte from a
-    /// future schema this build doesn't know about).
+    /// Inverse of [`Self::to_u8`] for the off-chain schema. This does not
+    /// imply the deployed Authorization PDA accepts every returned value.
     pub const fn from_u8(value: u8) -> Option<Self> {
         match value {
             1 => Some(Self::SolendWithdrawAllDelegated),
             2 => Some(Self::JupiterBuySolWithUsdc),
+            3 => Some(Self::SolendDeposit),
             _ => None,
         }
     }
@@ -597,6 +622,8 @@ mod tests {
     const SOLEND_USDC_RESERVE: &str = "BgxfHJDzm44T7XG68MYKx7YisTjZu73tVovyZSjJMpmw";
     const SOLEND_LENDING_MARKET: &str = "4UpD2fh7xH3VP9QQaXtsS1YY3bxzWhtfpks7FatyKvdY";
     const SOLEND_PROGRAM_ID: &str = "So1endDq2YkqhipRh3WViPa8hdiSpxWy6z3Z6tMCpAo";
+    const SOLEND_TARGET_OBLIGATION: &str = "BdFLjCcP9mCy557vNNGVbTUuvHxXsh8hc6jXzaPra1wN";
+    const CONTROLLED_WALLET: &str = "BPfDMmeMBmCbMC1rWh7hwigMBoKGBrKwXxSeUu9hhs5L";
     const TEST_USER: &str = "C4QQjzWxnJ5QFAbkzhQJ3wTzyX6nw1vyFvJwbPXJGPNW";
     const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
     const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
@@ -706,6 +733,30 @@ mod tests {
         }
     }
 
+    // ── Scenario C: canonical v2 Solend deposit ─────────────────────────
+
+    fn fixture_c_solend_deposit() -> WatchRule {
+        let mut rule = fixture_a_solend_apr_below_10();
+        let controlled = pk_from_str(CONTROLLED_WALLET);
+        rule.schema_version = STAGE2_WATCH_RULE_SCHEMA_V2;
+        rule.rule_id = [
+            0x53, 0x4f, 0x4c, 0x44, 0x45, 0x50, 0x4f, 0x53, 0x49, 0x54, 0, 0, 0, 0, 0, 2,
+        ];
+        rule.executor = controlled;
+        rule.delegated_wallet = controlled;
+        rule.action = ActionSpec::SolendDeposit {
+            target_obligation: pk_from_str(SOLEND_TARGET_OBLIGATION),
+            reserve_pubkey: pk_from_str(SOLEND_USDC_RESERVE),
+            lending_market: pk_from_str(SOLEND_LENDING_MARKET),
+            solend_program_id: pk_from_str(SOLEND_PROGRAM_ID),
+            input_mint: pk_from_str(USDC_MINT),
+            input_amount_raw: 500_000,
+        };
+        rule.max_input_amount_raw = 500_000;
+        rule.destination = controlled;
+        rule
+    }
+
     // ── Stable fixture-hash assertions (Phase B1 commit-pinned) ─────────
 
     /// Scenario A canonical hash. Any change to schema layout, fixture
@@ -726,6 +777,105 @@ mod tests {
             fmt_hex(&h),
             "ee8a1edb91a6c7b3d3c023adbdfa9df48901ccb71b1445a630a2d1038b48b7bb"
         );
+    }
+
+    #[test]
+    fn scenario_c_solend_deposit_fixture_hash_is_stable() {
+        let h = canonical_rule_hash(&fixture_c_solend_deposit());
+        assert_eq!(
+            fmt_hex(&h),
+            "094818b7d3ccea7b0f234b199a9bb8c8649d66508ae186c710e917074cc4b5aa"
+        );
+    }
+
+    #[test]
+    fn action_borsh_discriminators_are_append_only() {
+        assert_eq!(
+            borsh::to_vec(&fixture_a_solend_apr_below_10().action).unwrap()[0],
+            0
+        );
+        assert_eq!(
+            borsh::to_vec(&fixture_b_basket_buy_sol().action).unwrap()[0],
+            1
+        );
+        assert_eq!(
+            borsh::to_vec(&fixture_c_solend_deposit().action).unwrap()[0],
+            2
+        );
+    }
+
+    #[test]
+    fn solend_deposit_fields_are_all_hash_bound() {
+        let original = fixture_c_solend_deposit();
+        let mut mutations = Vec::new();
+
+        let mut target = original.clone();
+        if let ActionSpec::SolendDeposit {
+            ref mut target_obligation,
+            ..
+        } = target.action
+        {
+            *target_obligation = pk(0x41);
+        }
+        mutations.push(("target_obligation", target));
+
+        let mut reserve = original.clone();
+        if let ActionSpec::SolendDeposit {
+            ref mut reserve_pubkey,
+            ..
+        } = reserve.action
+        {
+            *reserve_pubkey = pk(0x42);
+        }
+        mutations.push(("reserve_pubkey", reserve));
+
+        let mut market = original.clone();
+        if let ActionSpec::SolendDeposit {
+            ref mut lending_market,
+            ..
+        } = market.action
+        {
+            *lending_market = pk(0x43);
+        }
+        mutations.push(("lending_market", market));
+
+        let mut program = original.clone();
+        if let ActionSpec::SolendDeposit {
+            ref mut solend_program_id,
+            ..
+        } = program.action
+        {
+            *solend_program_id = pk(0x44);
+        }
+        mutations.push(("solend_program_id", program));
+
+        let mut mint = original.clone();
+        if let ActionSpec::SolendDeposit {
+            ref mut input_mint,
+            ..
+        } = mint.action
+        {
+            *input_mint = pk(0x45);
+        }
+        mutations.push(("input_mint", mint));
+
+        let mut amount = original.clone();
+        if let ActionSpec::SolendDeposit {
+            ref mut input_amount_raw,
+            ..
+        } = amount.action
+        {
+            *input_amount_raw += 1;
+        }
+        mutations.push(("input_amount_raw", amount));
+
+        for (field, mutation) in mutations {
+            assert_ne!(
+                canonical_rule_hash(&original),
+                canonical_rule_hash(&mutation),
+                "{field} must be included in the canonical fingerprint"
+            );
+        }
     }
 
     // ── Determinism + variant separation ────────────────────────────────
@@ -749,6 +899,12 @@ mod tests {
     fn schema_version_is_first_canonical_byte() {
         let bytes = canonical_rule_bytes(&fixture_a_solend_apr_below_10());
         assert_eq!(bytes[0], STAGE2_WATCH_RULE_SCHEMA_V1);
+        let v2_bytes = canonical_rule_bytes(&fixture_c_solend_deposit());
+        assert_eq!(v2_bytes[0], STAGE2_WATCH_RULE_SCHEMA_V2);
+        assert_eq!(
+            STAGE2_WATCH_RULE_SCHEMA_VERSION,
+            STAGE2_WATCH_RULE_SCHEMA_V2
+        );
     }
 
     // ── Mutation tests — every load-bearing field is hash-included ──────
@@ -867,6 +1023,7 @@ mod tests {
         for fixture in [
             fixture_a_solend_apr_below_10(),
             fixture_b_basket_buy_sol(),
+            fixture_c_solend_deposit(),
         ] {
             let mut bumped = fixture.clone();
             bumped.expires_at_slot += 1;
@@ -999,6 +1156,7 @@ mod tests {
         for fixture in [
             fixture_a_solend_apr_below_10(),
             fixture_b_basket_buy_sol(),
+            fixture_c_solend_deposit(),
         ] {
             let bytes = canonical_rule_bytes(&fixture);
             let decoded: WatchRule = borsh::from_slice(&bytes).expect("borsh round-trip");
@@ -1158,6 +1316,7 @@ mod tests {
         for fixture in [
             fixture_a_solend_apr_below_10(),
             fixture_b_basket_buy_sol(),
+            fixture_c_solend_deposit(),
         ] {
             let m = WatchRuleMetadata::from_rule(&fixture);
             assert_eq!(m.schema_version, fixture.schema_version);
@@ -1209,6 +1368,7 @@ mod tests {
             WatchRuleActionType::JupiterBuySolWithUsdc.label(),
             "jupiter_buy_sol_with_usdc"
         );
+        assert_eq!(WatchRuleActionType::SolendDeposit.label(), "solend_deposit");
     }
 
     #[test]
@@ -1216,21 +1376,25 @@ mod tests {
         for v in [
             WatchRuleActionType::SolendWithdrawAllDelegated,
             WatchRuleActionType::JupiterBuySolWithUsdc,
+            WatchRuleActionType::SolendDeposit,
         ] {
             assert_eq!(WatchRuleActionType::from_u8(v.to_u8()), Some(v));
         }
-        // Stage 1's ActionType discriminators (1 = SolendDeposit,
-        // 2 = SolendWithdrawAll, 3 = JupiterSwap) are intentionally
-        // a different namespace; bytes outside the Stage 2 set must
-        // come back as None and never alias to a valid Stage 2 type.
+        // Stage 1's ActionType discriminators use a different namespace.
+        // Only the explicitly assigned Stage 2 values are accepted here;
+        // bytes outside that closed set must fail closed.
         assert_eq!(WatchRuleActionType::from_u8(0), None);
-        assert_eq!(WatchRuleActionType::from_u8(3), None);
+        assert_eq!(
+            WatchRuleActionType::from_u8(3),
+            Some(WatchRuleActionType::SolendDeposit)
+        );
         assert_eq!(WatchRuleActionType::from_u8(255), None);
 
         // Pin the on-chain wire values explicitly so any reorder /
         // renumber is loud.
         assert_eq!(WatchRuleActionType::SolendWithdrawAllDelegated.to_u8(), 1);
         assert_eq!(WatchRuleActionType::JupiterBuySolWithUsdc.to_u8(), 2);
+        assert_eq!(WatchRuleActionType::SolendDeposit.to_u8(), 3);
     }
 
     #[test]
@@ -1242,6 +1406,10 @@ mod tests {
         assert_eq!(
             fixture_b_basket_buy_sol().action.action_type(),
             WatchRuleActionType::JupiterBuySolWithUsdc
+        );
+        assert_eq!(
+            fixture_c_solend_deposit().action.action_type(),
+            WatchRuleActionType::SolendDeposit
         );
     }
 
@@ -1267,6 +1435,7 @@ mod tests {
         for (label, rule) in [
             ("A_solend_apr_below_10", fixture_a_solend_apr_below_10()),
             ("B_basket_buy_sol", fixture_b_basket_buy_sol()),
+            ("C_solend_deposit", fixture_c_solend_deposit()),
         ] {
             let bytes = canonical_rule_bytes(&rule);
             let hash = canonical_rule_hash(&rule);

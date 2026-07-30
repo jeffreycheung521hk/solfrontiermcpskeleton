@@ -53,7 +53,7 @@ pub use stage2_watch_rule::{
     ConditionLogic, JupiterApiVersion, RateKind, VerificationLevel, WatchRule,
     WatchRuleActionType, WatchRuleMetadata, WatchRuleValidationError, WithdrawMode,
     MAX_CONDITIONS, MIN_CONDITIONS, STAGE2_WATCH_RULE_SCHEMA_V1,
-    STAGE2_WATCH_RULE_SCHEMA_VERSION,
+    STAGE2_WATCH_RULE_SCHEMA_V2, STAGE2_WATCH_RULE_SCHEMA_VERSION,
 };
 pub use swap::{SwapIntent, SwapPolicyConfig, SwapPreview};
 pub use solana::{CommitmentLevel, SolanaEvent, SolanaNetwork};
