@@ -106,12 +106,12 @@ Phase 2 第一切片 `propose_intent`、第二切片 `finalize_intent` 已完成
 - **觸發條件:**`Phase 3 executor 上線前,必須決定 watcher 如何對待 orphan/rule-only rows`。
 - **補測觸發條件:**一旦 bin 取得可注入的 WatchRule repository seam、state-store 新增正式 transaction/recovery API,或最遲進入 Phase 3 executor 合併評審(三者取最早),必須加入 WatchRule insert/readback 雙失敗測試,同時斷言 orphan row 被保留而回應仍為 `rule_unconfirmed` 且不含入金指引。
 
-### DEBT-P2-FINALIZE-3:DB 與回傳 funding timestamps 不一致
+### DEBT-P2-FINALIZE-3（已清償）:persisted funding timestamps 是唯一 wall-clock 權威
 
-- **現況:**舊 wiring 在 consume draft 並解析 wallet 後、market reads 前擷取回傳用時間,bridge 則在網絡讀取完成後才用另一個 `now` 寫入 funding row。故**新插入**的 DB `created_at_ms`/`expires_at_ms` 可能比 tool 回傳值晚一段網絡延遲;本切片逐字保留這個 fresh-insert 差異。
-- **安全例外:**deterministic `intent_id` collision 走「回既有行」時,不得沿用舊 outer DTO 以本次 request wallet 與新 deadline 拼出 hybrid 指引。MCP bin 會完整核對既有 WatchRule/funding identity;只在同一 funding wallet、仍為 `funding_required` 且既有 deadline 未過期時,回傳主 DB 既有 wallet/ATA/amount/timestamps。wallet、rule shape 或 identity 衝突皆 fail closed 且不給 funding 指引;既有 deadline 已過或 lifecycle 已前進時亦不給可簽指引。
-- **風險:**簽名頁倒數依回傳 deadline 顯示,而 lifecycle/watcher 以主 DB deadline 為準;兩者在邊界附近可能對「已過期」有短暫不同判斷。
-- **觸發條件:**Phase 3 executor 合併評審前,必須明定 DB timestamps 與 tool 回傳 timestamps 的唯一權威來源及過期邊界,並讓 signing page、watcher/lifecycle 使用同一套判定;未完成不得關閉本債。
+- **清償方式:**[PR #8](https://github.com/jeffreycheung521hk/solfrontiermcpskeleton/pull/8) 在 fresh insert 後經 `Stage2W5hFundingIntentRepository::get` 讀回主 DB row;tool 頂層、nested `funding` 與 signing-page fragment 的 `created_at_ms`/`expires_at_ms` 全部逐值使用該 persisted row,不再由 bin 另造 deadline。
+- **值等價保證:**保留舊有 pre-market clock sample 及 persisted deadline 的生成順序,只改 authority、不改 DB deadline 值。fresh insert 與 deterministic collision 測試均斷言回應、funding payload、URL fragment 精確等於 repository 讀回值。
+- **過期邊界:**在輸出可簽 handoff 前重新讀 clock;`now_ms >= funding.expires_at_ms` 即不可 action,回應不得含 `funding`、`signing` 或 `signing_page_url`。WatchRule 的 `expires_at_slot` 仍是獨立的 slot-clock 權威,由 Phase 3 executor 與 persisted wall-clock deadline 共同 fail closed。
+- **回歸門檻:**任何修改 finalize persistence、collision recovery、signing URL 或 expiry 判定的 PR,都必須保留 repository readback equality 與 exact-endpoint 測試;不得重新引入 response-only timestamp。
 
 ### DEBT-P2-FINALIZE-4（已關閉）:故障回應測試缺口
 
