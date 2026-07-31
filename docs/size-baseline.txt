@@ -520,6 +520,8 @@ Note: numbers above are a result of guesswork. They are not 100% correct and nev
 === local target/debug disk incident (2026-07-29) ===
 `target/debug` 曾累積至約 209GB;清除後的一輪 fresh workspace gate 實測為 6,618,485,126 bytes(6.164GiB,8,467 files),其中 `deps/` 4.755GiB、`incremental/` 0.876GiB、Windows PDB 2.581GiB、rlib 2.041GiB。調查排除 `claw-protocols/test-fixtures` 為主因:該空 feature 不啟用額外 dependency feature,只由 `solfrontier-mcp` dev-dependency 啟用;fresh target 只有一份 `libclaw_protocols` rlib、一份 `libsolana_sdk` rlib,protocols 的兩個 incremental sessions 合計約 38.2MiB。209GB 原始 cache 已刪除,故不能事後逐 byte 歸因;但 fresh 分布與 Cargo 行為支持主因是長期交替 package/workspace、dev/test、branch/feature/profile 環境後殘留的多代 fingerprint、PDB、rlib 與 incremental sessions,Cargo 不會自動回收舊 generation,而非 test-fixtures 複製整棵 Solana dependency tree。全量 gate 因此移至具獨立 cache 與 120 分鐘預算的 Windows GitHub Actions jobs;本機僅做輕量預檢。
 
+調查於 2026-07-31 正式關閉:第一次量得的 209GB `target/debug` 膨脹屬實;其後「磁碟 0GB」事件則是沙箱內 `Get-PSDrive` 同時回報 `Used=0`/`Free=0` 的假值。沙箱外 `DriveInfo`、`Get-PSDrive` 與 `Win32_LogicalDisk` 一致量得 C 槽 472.811GiB、已用約 255.3GiB、可用約 217.5GiB;可讀頂層目錄與根系統檔合計 231.911GiB,其餘約 23.4GiB 可由受保護目錄/VSS/NTFS metadata 的不可列舉範圍容納,容量對帳已閉合。歷史瞬時 `LNK1104` 的根因仍標記為 ND(not determined),不得再由單一沙箱容量讀數推導或觸發清理。
+
 === after Solend reserve execution decoder (Windows CI, 2026-07-29) ===
 Gate run: https://github.com/jeffreycheung521hk/solfrontiermcpskeleton/actions/runs/30459550075
 Artifact: https://github.com/jeffreycheung521hk/solfrontiermcpskeleton/actions/runs/30459550075/artifacts/8727983454

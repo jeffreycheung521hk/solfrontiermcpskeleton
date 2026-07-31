@@ -93,6 +93,23 @@ mint、Memo 與指令順序來自已核對的 finalize 回應，`confirm_funding
 - PR：[#4](https://github.com/jeffreycheung521hk/solfrontiermcpskeleton/pull/4)
 - 驗收程式進入 `main` 的 merge commit：`43f9827`
 
+## 驗收資料庫離線備份
+
+2026-07-31 已在確認 SQLite 三檔無開啟程序後,把
+`data/acceptance/phase2-mainnet-20260729-04.db{,-wal,-shm}` 複製到
+`E:\SolFrontierAcceptanceBackup\phase3b-disk-diagnostic-20260731\`。
+來源與備份合計皆為 757,896 bytes,逐檔大小及 SHA-256 完全相同:
+
+| 檔案 | Bytes | SHA-256 |
+|---|---:|---|
+| `phase2-mainnet-20260729-04.db` | 4,096 | `1FE8F6113488865C546D2FAA55B21482662CE4BE19D4F505EEEFA09BC3131489` |
+| `phase2-mainnet-20260729-04.db-wal` | 721,032 | `61AA916B62A5FD14D56B692606E5B5A29B02C96FC4C31BA95E08322065B643C9` |
+| `phase2-mainnet-20260729-04.db-shm` | 32,768 | `E58278973DCE35EEFE4FB2EB3DE46E6522CC23B4CAD7BF1F9609C57679686538` |
+
+此路徑是本機可移除 E 槽上的災難復原索引,不是 repo 內容;原始
+acceptance 三檔與備份均不得作為測試寫入目標。測試必須複製完整
+`.db`/`-wal`/`-shm` family 到暫存目錄後才可開啟。
+
 ## 合併後 main gate
 
 在 `main@43f9827` 重新執行：
