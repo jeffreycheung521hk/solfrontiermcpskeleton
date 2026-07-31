@@ -27,12 +27,17 @@ claw-types         = { workspace = true }
 claw-observability = { workspace = true }
 claw-state-store   = { workspace = true }
 claw-solana-core   = { workspace = true }
+claw-wallet-engine = { workspace = true }
+claw-risk-engine   = { workspace = true }
 claw-protocols     = { workspace = true }
 claw-executor      = { workspace = true }
 hex                = { workspace = true }
+async-trait        = { workspace = true }
+chrono             = { workspace = true }
 
 solana-sdk             = { workspace = true }
 solana-client          = { workspace = true }
+solana-transaction-status = { workspace = true }
 solana-account-decoder = { workspace = true }
 spl-token              = { workspace = true }
 spl-associated-token-account = { workspace = true }

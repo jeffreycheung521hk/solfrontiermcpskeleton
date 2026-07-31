@@ -140,6 +140,8 @@ fn usdc_mint() -> PubkeyBytes {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedSolendPlanInputs {
     pub solend_program_id: PubkeyBytes,
+    /// Fingerprint-bound liquidity mint carried from `SolendDeposit`.
+    pub input_mint: PubkeyBytes,
     pub input_amount_raw: u64,
     pub source_liquidity: PubkeyBytes,
     pub user_collateral: PubkeyBytes,
@@ -694,6 +696,7 @@ pub fn validate_chain(
 
     ChainOutcome::Ready(ValidatedSolendPlanInputs {
         solend_program_id: action.solend_program_id,
+        input_mint: action.input_mint,
         input_amount_raw: action.input_amount_raw,
         source_liquidity: facts.derived.source_liquidity_ata,
         user_collateral: facts.derived.collateral_ata,
