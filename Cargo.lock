@@ -780,6 +780,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "claw-executor"
+version = "0.1.0"
+dependencies = [
+ "claw-types",
+ "hex",
+ "serde",
+]
+
+[[package]]
 name = "claw-observability"
 version = "0.1.0"
 dependencies = [
@@ -5447,14 +5456,16 @@ name = "solfrontier-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.21.7",
+ "bincode",
  "clap",
+ "claw-executor",
  "claw-observability",
  "claw-protocols",
- "claw-risk-engine",
  "claw-solana-core",
  "claw-state-store",
  "claw-types",
- "claw-wallet-engine",
+ "hex",
  "reqwest",
  "rmcp",
  "schemars 1.2.1",
@@ -5464,6 +5475,7 @@ dependencies = [
  "solana-client",
  "solana-sdk",
  "spl-associated-token-account 6.0.0",
+ "spl-token 7.0.0",
  "sqlx",
  "thiserror 1.0.69",
  "tokio",

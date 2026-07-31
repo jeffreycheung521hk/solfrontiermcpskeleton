@@ -33,7 +33,8 @@ directly in the instruction and from the amount encoded directly in its data.
 The executor must derive and verify it through reserve decoding, ATA derivation,
 and token-account state. It must not claim a direct account-meta match.
 
-The following invariant is mandatory before signing:
+The following invariant is mandatory before Phase 3b-1 may even report an
+unsigned plan; signing remains outside this slice:
 
 ```text
 action.input_amount_raw
@@ -115,6 +116,8 @@ schema amendment alone does not alter any newly persisted placeholder hash.
 PR-C is the separately reviewed cutover that removes the placeholder and makes
 new deposit drafts persist a v2 `SolendDeposit`. Expired historical intents,
 including the Phase 2 acceptance specimen, are not migrated or rewritten.
+PR-C has since merged as PR #12; v1 and v2 rows therefore coexist under their
+own `schema_version`, while new supported deposit finalizations use v2.
 
 ## Authorization boundary
 
@@ -125,3 +128,20 @@ withdraw-only. The Phase 3 controlled-wallet direct execution rail does not
 invoke that program or an Authorization PDA. Any future deposit through the PDA
 rail is blocked on the program/schema work recorded in
 `DEBT-P3-SCHEMA-1`.
+
+## Phase 3b-1 unsigned dry-run boundary
+
+The read-only watcher joins only rows exposed by the public repositories,
+recomputes the canonical hash, checks both persisted deadlines, enforces the
+three-way amount invariant, decodes and verifies reserve/obligation/token
+accounts, requires the collateral ATA to exist, and reuses finalize's one
+integer-only WAD calculation for the condition. It can then assemble compute
+limit → compute price → `RefreshReserve` → deposit for human inspection.
+
+The serialized transaction deliberately contains the default all-zero
+blockhash and default signature slots. Its report says `sendable:false` and
+`recent_blockhash:null`; it has no lease, keypair, signing, simulation,
+broadcast, submit, confirmation, or state-transition path. The predecessor
+transaction above externally validates the schema/account ordering and builder
+shape. It does not prove that a current database candidate passes the watcher,
+and it is not a current-repository execution round trip.

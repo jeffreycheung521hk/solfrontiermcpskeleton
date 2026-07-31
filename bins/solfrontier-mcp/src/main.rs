@@ -7,8 +7,10 @@
 //! random non-canonical draft id, and creates the legacy-compatible WatchRule
 //! plus funding-intent rows. A separate `confirm_funding` tool verifies an
 //! already user-signed transaction before advancing the two funding CAS
-//! transitions. The binary still performs no signing, transaction
-//! construction, broadcast, or watcher/executor action.
+//! transitions. Phase 3b adds a separate `watch` subcommand which can only
+//! assemble and print a deliberately unsubmitable unsigned transaction: it
+//! has no lease, keypair, signing, broadcast, confirmation, or
+//! state-transition capability.
 //!
 //! System invariants INV-1..INV-8 (原 ARCHITECTURE.md) apply verbatim.
 //! In particular: this binary must NEVER hold main-wallet key material,
@@ -27,8 +29,9 @@ mod propose;
 mod quote;
 mod sidecar;
 mod status;
+mod watch;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use claw_state_store::{
     Database, DatabaseConfig, Stage2W5hFundingIntentRepository, Stage2WatchRuleRepository,
 };
@@ -254,9 +257,23 @@ struct Cli {
         long,
         env = "SOLFRONTIER_DB",
         default_value = "./data/solfrontier.db",
-        value_name = "PATH"
+        value_name = "PATH",
+        global = true
     )]
     db: PathBuf,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Continuously inspect executable intents without signing or DB writes.
+    Watch {
+        /// Scan exactly once and exit (for tests and human review).
+        #[arg(long)]
+        once: bool,
+    },
 }
 
 const INSTRUCTIONS: &str = "SolFrontier is a fail-closed, policy-gated control plane for bounded \
@@ -289,6 +306,10 @@ async fn main() -> anyhow::Result<()> {
         .with_max_level(tracing::Level::INFO)
         .with_writer(std::io::stderr)
         .init();
+
+    if let Some(Command::Watch { once }) = &cli.command {
+        return crate::watch::run_watch(&cli.db, *once).await;
+    }
 
     tracing::info!("solfrontier-mcp starting (stdio, Phase 2 funding slice)");
     let position_reader = configured_reader_from_env();

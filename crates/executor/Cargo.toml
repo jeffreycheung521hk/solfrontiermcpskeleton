@@ -1,0 +1,13 @@
+[package]
+name        = "claw-executor"
+description = "Pure fail-closed classification for SolFrontier dry-run execution candidates"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+
+[dependencies]
+claw-types = { workspace = true }
+hex        = { workspace = true }
+serde      = { workspace = true }
