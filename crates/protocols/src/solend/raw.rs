@@ -64,7 +64,8 @@ const OBL_LIQ_BORROWED_AMOUNT_WADS_OFF: usize = 48;
 
 // Deployed mainnet Reserve layout. This is an execution-only projection of
 // the 619-byte account, not a complete Reserve representation:
-//   9     1    last_update.stale (validated, not returned)
+//   1     8    last_update.slot
+//   9     1    last_update.stale
 //   10    32   lending_market
 //   42    32   liquidity.mint_pubkey
 //   74    1    liquidity.mint_decimals
@@ -75,6 +76,7 @@ const OBL_LIQ_BORROWED_AMOUNT_WADS_OFF: usize = 48;
 //   267   32   collateral.supply_pubkey
 pub const RESERVE_LEN: usize = 619;
 
+const RES_LAST_UPDATE_SLOT_OFF: usize = 1;
 const RES_LAST_UPDATE_STALE_OFF: usize = 9;
 const RES_LENDING_MARKET_OFF: usize = 10;
 const RES_LIQ_MINT_OFF: usize = 42;
@@ -122,6 +124,10 @@ pub struct SolendObligationLiquidityRaw {
 /// protocol decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SolendReserveRaw {
+    /// Slot recorded by Solend's reserve `LastUpdate`.
+    pub last_update_slot: u64,
+    /// Solend's explicit stale flag from the same `LastUpdate`.
+    pub last_update_stale: bool,
     pub lending_market: Pubkey,
     pub liquidity_mint: Pubkey,
     pub liquidity_mint_decimals: u8,
@@ -263,11 +269,13 @@ pub fn decode_reserve(data: &[u8]) -> Result<SolendReserveRaw, DecodeError> {
         return Err(DecodeError::ReserveWrongSize(data.len()));
     }
 
-    read_bool(data, RES_LAST_UPDATE_STALE_OFF).ok_or(DecodeError::ReserveStaleBitInvalid(
-        data[RES_LAST_UPDATE_STALE_OFF],
-    ))?;
+    let last_update_stale = read_bool(data, RES_LAST_UPDATE_STALE_OFF).ok_or(
+        DecodeError::ReserveStaleBitInvalid(data[RES_LAST_UPDATE_STALE_OFF]),
+    )?;
 
     Ok(SolendReserveRaw {
+        last_update_slot: read_u64_le(data, RES_LAST_UPDATE_SLOT_OFF),
+        last_update_stale,
         lending_market: read_pubkey(data, RES_LENDING_MARKET_OFF),
         liquidity_mint: read_pubkey(data, RES_LIQ_MINT_OFF),
         liquidity_mint_decimals: data[RES_LIQ_MINT_DECIMALS_OFF],
@@ -378,6 +386,8 @@ mod tests {
 
     fn synthetic_execution_reserve() -> (Vec<u8>, SolendReserveRaw) {
         let expected = SolendReserveRaw {
+            last_update_slot: 0x0102_0304_0506_0708,
+            last_update_stale: true,
             lending_market: Pubkey::new_from_array([0x11; 32]),
             liquidity_mint: Pubkey::new_from_array([0x22; 32]),
             liquidity_mint_decimals: 6,
@@ -388,7 +398,9 @@ mod tests {
             collateral_supply: Pubkey::new_from_array([0x77; 32]),
         };
         let mut data = vec![0_u8; RESERVE_LEN];
-        data[RES_LAST_UPDATE_STALE_OFF] = 1;
+        data[RES_LAST_UPDATE_SLOT_OFF..RES_LAST_UPDATE_SLOT_OFF + 8]
+            .copy_from_slice(&expected.last_update_slot.to_le_bytes());
+        data[RES_LAST_UPDATE_STALE_OFF] = u8::from(expected.last_update_stale);
         data[RES_LENDING_MARKET_OFF..RES_LENDING_MARKET_OFF + 32]
             .copy_from_slice(&expected.lending_market.to_bytes());
         data[RES_LIQ_MINT_OFF..RES_LIQ_MINT_OFF + 32]
@@ -501,6 +513,12 @@ mod tests {
         let reserve = decode_reserve(&data).expect("mainnet fixture must decode");
 
         assert_eq!(data.len(), RESERVE_LEN);
+        assert_eq!(reserve.last_update_slot, 435_907_953);
+        assert!(!reserve.last_update_stale);
+        assert!(
+            reserve.last_update_slot <= 435_907_990,
+            "reserve update cannot be newer than the finalized capture slot"
+        );
         assert_eq!(reserve.lending_market, key(MAIN_POOL_LENDING_MARKET));
         assert_eq!(reserve.liquidity_mint, key(USDC_MINT));
         assert_eq!(reserve.liquidity_mint_decimals, 6);
