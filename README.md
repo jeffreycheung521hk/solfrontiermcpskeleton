@@ -277,6 +277,35 @@ The completed 0.1 USDC mainnet acceptance and post-merge gate are recorded in
 > `propose → finalize → open page → Phantom sign → confirm_funding` in one
 > continuous flow. A late payment is recorded but held for manual recovery.
 
+> **Phase 3b rule identity must be unused before starting:** `derive_rule_id`
+> takes `threshold_bps`, `amount_raw`, and `controlled_wallet`, but the
+> controlled wallet is a compile-time constant. In this rail, identity is
+> therefore effectively determined only by `(threshold_bps, amount_raw)`:
+>
+> ```text
+> intent_id = hex(
+>   threshold_bps as u32 little-endian
+>   || amount_raw as u64 little-endian
+>   || first 4 decoded bytes of the pinned controlled wallet
+> )
+> ```
+>
+> The Phase 2 acceptance specimen already occupies `(50, 100000)` / 0.1 USDC,
+> whose `intent_id` is `32000000a0860100000000009a62dace`; do not reuse that
+> tuple for Phase 3b. The 0.5 USDC / 50 bps example below maps to
+> `3200000020a10700000000009a62dace`. Before `propose_intent`, call
+> `get_intent_status` with the prospective identity:
+>
+> ```json
+> {
+>   "intent_ref": "3200000020a10700000000009a62dace"
+> }
+> ```
+>
+> Continue only when it returns `status: "not_found"`. If any row already
+> exists, choose a different approved amount or threshold; never migrate,
+> overwrite, or manually edit the historical database row.
+
 1. Build the release binary and keep the real `SOLFRONTIER_RPC_URL` only in the
    MCP host environment. The Save read uses its pinned public endpoint.
 2. In another terminal, start the signing page with the exact loopback command
