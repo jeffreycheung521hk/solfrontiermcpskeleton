@@ -23,7 +23,7 @@ use std::{str::FromStr, time::Duration};
 
 use claw_solana_core::{rpc::EndpointConfig, RpcPool, RpcPoolConfig};
 use serde_json::Value;
-use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey};
+use solana_sdk::{account::Account, commitment_config::CommitmentConfig, pubkey::Pubkey};
 
 const RPC_ENDPOINT_LABEL: &str = "configured-read-rpc";
 const MARKET_READ_TIMEOUT: Duration = Duration::from_secs(8);
@@ -65,6 +65,22 @@ pub(crate) struct FinalizeMarketSnapshot {
     pub(crate) save_display_apy_bps: u32,
 }
 
+/// One confirmed, read-only Solend reserve observation.
+///
+/// The account is returned intact so downstream read-only consumers can first
+/// verify its owner, identity, and freshness, then pass these exact bytes to
+/// [`native_supply_apr_from_reserve_data`]. They must not issue a second
+/// reserve read and accidentally mix two ledger snapshots.
+#[derive(Debug, Clone)]
+pub(crate) struct ConfirmedReserveObservation {
+    /// Confirmed slot returned immediately before the reserve read.
+    pub(crate) current_confirmed_slot: u64,
+    /// The exact reserve pubkey requested from RPC.
+    pub(crate) reserve_pubkey: Pubkey,
+    /// The exact confirmed account to validate and evaluate.
+    pub(crate) reserve_account: Account,
+}
+
 /// Fixed error classes safe to return through MCP.
 ///
 /// No variant retains an upstream error, endpoint, response body, or mismatched
@@ -77,7 +93,9 @@ pub(crate) enum FinalizeMarketReadError {
     SlotRequestFailed,
     #[error("Solana reserve-account request failed")]
     ReserveRequestFailed,
-    #[error("the pinned Solend reserve account was not found")]
+    #[error("Solana account request failed")]
+    AccountRequestFailed,
+    #[error("the requested Solend reserve account was not found")]
     ReserveAccountMissing,
     #[error("the pinned Solend reserve account could not be decoded")]
     ReserveDecodeFailed,
@@ -107,6 +125,7 @@ impl FinalizeMarketReadError {
             Self::RpcPoolUnavailable => "rpc_pool_unavailable",
             Self::SlotRequestFailed => "slot_request_failed",
             Self::ReserveRequestFailed => "reserve_request_failed",
+            Self::AccountRequestFailed => "account_request_failed",
             Self::ReserveAccountMissing => "reserve_account_missing",
             Self::ReserveDecodeFailed => "reserve_decode_failed",
             Self::AprComputationFailed => "apr_computation_failed",
@@ -194,6 +213,112 @@ impl RpcSaveFinalizeMarketSource {
             .map_err(|_| FinalizeMarketReadError::SaveInvalidResponse)?;
         parse_save_display_apy_bps(&body)
     }
+
+    /// Read any account at confirmed commitment without retaining an endpoint
+    /// or upstream error in the returned result.
+    ///
+    /// `Ok(None)` is deliberately distinct from transport failure so the
+    /// dry-run executor can classify a missing ATA without turning it into an
+    /// RPC protocol error.
+    pub(crate) async fn fetch_confirmed_account(
+        &self,
+        pubkey: &Pubkey,
+    ) -> Result<Option<Account>, FinalizeMarketReadError> {
+        let client = self
+            .rpc_pool
+            .read_client()
+            .map_err(|_| FinalizeMarketReadError::RpcPoolUnavailable)?;
+        match client
+            .get_account_with_commitment(pubkey, CommitmentConfig::confirmed())
+            .await
+        {
+            Ok(response) => {
+                self.rpc_pool.record_success(&client.url());
+                Ok(response.value)
+            }
+            Err(_) => {
+                self.rpc_pool.record_failure(&client.url());
+                Err(FinalizeMarketReadError::AccountRequestFailed)
+            }
+        }
+    }
+
+    /// Read the current slot at confirmed commitment.
+    ///
+    /// Dry-run watch samples this once for the initial database classification
+    /// and again after all account reads. The second sample closes the
+    /// deadline TOCTOU window before an unsigned plan is reported as ready.
+    pub(crate) async fn fetch_confirmed_slot(&self) -> Result<u64, FinalizeMarketReadError> {
+        let client = self
+            .rpc_pool
+            .read_client()
+            .map_err(|_| FinalizeMarketReadError::RpcPoolUnavailable)?;
+        match client
+            .get_slot_with_commitment(CommitmentConfig::confirmed())
+            .await
+        {
+            Ok(slot) => {
+                self.rpc_pool.record_success(&client.url());
+                Ok(slot)
+            }
+            Err(_) => {
+                self.rpc_pool.record_failure(&client.url());
+                Err(FinalizeMarketReadError::SlotRequestFailed)
+            }
+        }
+    }
+
+    /// Read one reserve at confirmed commitment and calculate its native APR
+    /// using the single WAD implementation in this module.
+    ///
+    /// The slot is fetched immediately before exactly one reserve-account
+    /// request, preserving finalize's established observation ordering.
+    pub(crate) async fn fetch_confirmed_reserve_observation(
+        &self,
+        reserve_pubkey: Pubkey,
+    ) -> Result<ConfirmedReserveObservation, FinalizeMarketReadError> {
+        let client = self
+            .rpc_pool
+            .read_client()
+            .map_err(|_| FinalizeMarketReadError::RpcPoolUnavailable)?;
+
+        let current_confirmed_slot = match client
+            .get_slot_with_commitment(CommitmentConfig::confirmed())
+            .await
+        {
+            Ok(slot) => {
+                self.rpc_pool.record_success(&client.url());
+                slot
+            }
+            Err(_) => {
+                self.rpc_pool.record_failure(&client.url());
+                return Err(FinalizeMarketReadError::SlotRequestFailed);
+            }
+        };
+
+        let account_response = match client
+            .get_account_with_commitment(&reserve_pubkey, CommitmentConfig::confirmed())
+            .await
+        {
+            Ok(response) => {
+                self.rpc_pool.record_success(&client.url());
+                response
+            }
+            Err(_) => {
+                self.rpc_pool.record_failure(&client.url());
+                return Err(FinalizeMarketReadError::ReserveRequestFailed);
+            }
+        };
+        let reserve_account = account_response
+            .value
+            .ok_or(FinalizeMarketReadError::ReserveAccountMissing)?;
+
+        Ok(ConfirmedReserveObservation {
+            current_confirmed_slot,
+            reserve_pubkey,
+            reserve_account,
+        })
+    }
 }
 
 /// A missing, blank, or non-Unicode RPC setting leaves the server available.
@@ -211,62 +336,41 @@ pub(crate) fn configured_finalize_market_source_from_env() -> Option<RpcSaveFina
 
 impl FinalizeMarketDataSource for RpcSaveFinalizeMarketSource {
     async fn fetch_snapshot(&self) -> Result<FinalizeMarketSnapshot, FinalizeMarketReadError> {
-        let client = self
-            .rpc_pool
-            .read_client()
-            .map_err(|_| FinalizeMarketReadError::RpcPoolUnavailable)?;
-
-        let last_checked_slot = match client
-            .get_slot_with_commitment(CommitmentConfig::confirmed())
-            .await
-        {
-            Ok(slot) => {
-                self.rpc_pool.record_success(&client.url());
-                slot
-            }
-            Err(_) => {
-                self.rpc_pool.record_failure(&client.url());
-                return Err(FinalizeMarketReadError::SlotRequestFailed);
-            }
-        };
-
-        let account_response = match client
-            .get_account_with_commitment(&self.reserve_pubkey, CommitmentConfig::confirmed())
-            .await
-        {
-            Ok(response) => {
-                self.rpc_pool.record_success(&client.url());
-                response
-            }
-            Err(_) => {
-                self.rpc_pool.record_failure(&client.url());
-                return Err(FinalizeMarketReadError::ReserveRequestFailed);
-            }
-        };
-        let account = account_response
-            .value
-            .ok_or(FinalizeMarketReadError::ReserveAccountMissing)?;
-        let reserve = decode_reserve_rate_snapshot(&account.data)
-            .map_err(|_| FinalizeMarketReadError::ReserveDecodeFailed)?;
-        let apr_wad =
-            supply_apr_wad(&reserve).map_err(|_| FinalizeMarketReadError::AprComputationFailed)?;
-        let native_onchain_apr_bps = apr_bps_from_wad(apr_wad);
-        if native_onchain_apr_bps > APR_BPS_SANITY_MAX {
-            return Err(FinalizeMarketReadError::AprOutOfRange);
-        }
-        let native_onchain_apr_bps = u32::try_from(native_onchain_apr_bps)
-            .map_err(|_| FinalizeMarketReadError::AprOutOfRange)?;
+        let observation = self
+            .fetch_confirmed_reserve_observation(self.reserve_pubkey)
+            .await?;
+        let (_, native_onchain_apr_bps) =
+            native_supply_apr_from_reserve_data(&observation.reserve_account.data)?;
 
         // Preserve predecessor ordering and fail closed: Save is read only
         // after the native snapshot succeeds, and there is no native fallback.
         let save_display_apy_bps = self.fetch_save_display_apy_bps().await?;
 
         Ok(FinalizeMarketSnapshot {
-            last_checked_slot,
+            last_checked_slot: observation.current_confirmed_slot,
             native_onchain_apr_bps,
             save_display_apy_bps,
         })
     }
+}
+
+/// Evaluate a previously validated reserve account with the one canonical
+/// integer-only WAD implementation shared by finalize and dry-run watch.
+pub(crate) fn native_supply_apr_from_reserve_data(
+    reserve_data: &[u8],
+) -> Result<(u128, u32), FinalizeMarketReadError> {
+    let reserve = decode_reserve_rate_snapshot(reserve_data)
+        .map_err(|_| FinalizeMarketReadError::ReserveDecodeFailed)?;
+    let native_onchain_apr_wad =
+        supply_apr_wad(&reserve).map_err(|_| FinalizeMarketReadError::AprComputationFailed)?;
+    let native_onchain_apr_bps = apr_bps_from_wad(native_onchain_apr_wad);
+    if native_onchain_apr_bps > APR_BPS_SANITY_MAX {
+        return Err(FinalizeMarketReadError::AprOutOfRange);
+    }
+    let native_onchain_apr_bps = u32::try_from(native_onchain_apr_bps)
+        .map_err(|_| FinalizeMarketReadError::AprOutOfRange)?;
+
+    Ok((native_onchain_apr_wad, native_onchain_apr_bps))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -695,6 +799,71 @@ mod tests {
     }
 
     #[test]
+    fn confirmed_observation_preserves_account_and_wad_uses_the_same_bytes() {
+        let current_confirmed_slot = 415_083_795;
+        let reserve_pubkey = Pubkey::new_from_array([0x41; 32]);
+        let reserve_owner = Pubkey::new_from_array([0x42; 32]);
+        let reserve_account = Account {
+            lamports: 12_345,
+            data: reserve_fixture(),
+            owner: reserve_owner,
+            executable: false,
+            rent_epoch: 99,
+        };
+
+        let observation = ConfirmedReserveObservation {
+            current_confirmed_slot,
+            reserve_pubkey,
+            reserve_account: reserve_account.clone(),
+        };
+        let (apr_wad, apr_bps) =
+            native_supply_apr_from_reserve_data(&observation.reserve_account.data)
+                .expect("fixture must produce the native APR");
+
+        assert_eq!(observation.current_confirmed_slot, current_confirmed_slot);
+        assert_eq!(observation.reserve_pubkey, reserve_pubkey);
+        assert_eq!(observation.reserve_account.owner, reserve_owner);
+        assert_eq!(observation.reserve_account.data, reserve_account.data);
+        assert_eq!(
+            observation.reserve_account.lamports,
+            reserve_account.lamports
+        );
+        assert_eq!(
+            observation.reserve_account.rent_epoch,
+            reserve_account.rent_epoch
+        );
+        assert_eq!(
+            observation.reserve_account.executable,
+            reserve_account.executable
+        );
+        assert_eq!(apr_wad, 11_875_000_000_000_000);
+        assert_eq!(apr_bps, 118);
+    }
+
+    #[test]
+    fn native_apr_adapter_maps_decode_and_math_failures_to_fixed_classes() {
+        assert_eq!(
+            native_supply_apr_from_reserve_data(&vec![0_u8; RESERVE_LEN - 1]),
+            Err(FinalizeMarketReadError::ReserveDecodeFailed)
+        );
+
+        let mut invalid_stale = reserve_fixture();
+        invalid_stale[RES_LAST_UPDATE_STALE_OFF] = 2;
+        assert_eq!(
+            native_supply_apr_from_reserve_data(&invalid_stale),
+            Err(FinalizeMarketReadError::ReserveDecodeFailed)
+        );
+
+        let mut invalid_curve = reserve_fixture();
+        invalid_curve[RES_CONFIG_MIN_BORROW_RATE_OFF] = 200;
+        invalid_curve[RES_CONFIG_OPTIMAL_BORROW_RATE_OFF] = 1;
+        assert_eq!(
+            native_supply_apr_from_reserve_data(&invalid_curve),
+            Err(FinalizeMarketReadError::AprComputationFailed)
+        );
+    }
+
+    #[test]
     fn reserve_decoder_rejects_size_and_noncanonical_stale_bit() {
         assert_eq!(
             decode_reserve_rate_snapshot(&vec![0_u8; RESERVE_LEN - 1]),
@@ -806,6 +975,7 @@ mod tests {
             FinalizeMarketReadError::RpcPoolUnavailable,
             FinalizeMarketReadError::SlotRequestFailed,
             FinalizeMarketReadError::ReserveRequestFailed,
+            FinalizeMarketReadError::AccountRequestFailed,
             FinalizeMarketReadError::ReserveAccountMissing,
             FinalizeMarketReadError::ReserveDecodeFailed,
             FinalizeMarketReadError::AprComputationFailed,
@@ -835,10 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn module_has_only_the_read_market_seam() {
-        let method_names = &["fetch_snapshot"];
-        assert_eq!(method_names, &["fetch_snapshot"]);
-
+    fn source_has_no_write_sign_or_raw_error_capability() {
         const SOURCE: &str = include_str!("finalize_market.rs");
         let forbidden = [
             [".", "post("].concat(),

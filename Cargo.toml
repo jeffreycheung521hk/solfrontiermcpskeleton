@@ -8,6 +8,7 @@ members = [
     "crates/wallet-engine",
     "crates/risk-engine",
     "crates/protocols",
+    "crates/executor",
     "bins/solfrontier-mcp",
 ]
 
@@ -90,6 +91,7 @@ claw-solana-core   = { path = "crates/solana-core" }
 claw-wallet-engine = { path = "crates/wallet-engine" }
 claw-risk-engine   = { path = "crates/risk-engine" }
 claw-protocols     = { path = "crates/protocols" }
+claw-executor      = { path = "crates/executor" }
 
 # ── 體積優先 release profile(建議書 §3.2)──────────────────────
 [profile.release]
