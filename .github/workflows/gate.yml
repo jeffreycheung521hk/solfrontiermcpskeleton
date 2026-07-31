@@ -3,14 +3,16 @@ name: gate
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
   # A push to an open PR emits both push and pull_request events. Use the
-  # shared head branch name so the newer run cancels the duplicate cold build.
-  group: gate-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  # shared head branch name so the newer automatic run cancels the duplicate
+  # cold build. Keep manual size runs isolated from automatic validation.
+  group: gate-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}-${{ github.event_name == 'workflow_dispatch' && 'manual' || 'automatic' }}
   cancel-in-progress: true
 
 jobs:
@@ -50,6 +52,7 @@ jobs:
           if ("${{ github.event_name }}" -eq "pull_request") {
             $baseCandidate = "${{ github.event.pull_request.base.sha }}"
           } elseif (
+            "${{ github.event_name }}" -eq "push" -and
             "${{ github.ref_name }}" -eq $defaultBranch -and
             "${{ github.event.before }}" -notmatch "^0+$"
           ) {
@@ -147,6 +150,9 @@ jobs:
   release-artifact:
     name: Windows release artifact
     needs: validate
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: windows-latest
     timeout-minutes: 120
     env:
@@ -173,8 +179,20 @@ jobs:
         shell: pwsh
         run: |
           $binary = Get-Item -LiteralPath target/release/solfrontier-mcp.exe
+          $checksum = Get-FileHash -LiteralPath $binary.FullName -Algorithm SHA256
           Write-Host "Release binary bytes: $($binary.Length)"
-          Get-FileHash -LiteralPath $binary.FullName -Algorithm SHA256
+          Write-Host "Release binary SHA-256: $($checksum.Hash)"
+
+          $summary = @(
+            "## Windows release artifact",
+            "",
+            "| Field | Value |",
+            "| --- | --- |",
+            "| Bytes | $($binary.Length) |",
+            "| SHA-256 | $($checksum.Hash) |",
+            "| Run ID | ${{ github.run_id }} |"
+          )
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $summary -Encoding utf8
 
       - name: Upload release binary
         uses: actions/upload-artifact@v4
