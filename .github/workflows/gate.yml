@@ -68,12 +68,16 @@ jobs:
           # remain protected here; PR-B restores all six paths.
           Write-Host "Unamended frozen-core comparison base: $mergeBase"
           git diff --name-only $mergeBase HEAD -- `
+            crates/types `
             crates/observability `
+            crates/state-store `
             crates/solana-core `
             crates/wallet-engine `
             crates/risk-engine
           git diff --exit-code $mergeBase HEAD -- `
+            crates/types `
             crates/observability `
+            crates/state-store `
             crates/solana-core `
             crates/wallet-engine `
             crates/risk-engine
