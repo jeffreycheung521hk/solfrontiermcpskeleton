@@ -945,6 +945,59 @@ mod tests {
         }
     }
 
+    fn pre_pr_c_rule_id(
+        threshold_bps: u32,
+        amount_raw: u64,
+        controlled_wallet: &PubkeyBytes,
+    ) -> [u8; 16] {
+        let mut rule_id = [0_u8; 16];
+        rule_id[0..4].copy_from_slice(&threshold_bps.to_le_bytes());
+        rule_id[4..12].copy_from_slice(&amount_raw.to_le_bytes());
+        rule_id[12..16].copy_from_slice(&controlled_wallet.0[0..4]);
+        rule_id
+    }
+
+    fn legacy_carrier_rule(amount_raw: u64, created_at_slot: u64) -> WatchRule {
+        let controlled =
+            PubkeyBytes::from_base58(CONTROLLED_WALLET_BS58).expect("pinned controlled wallet");
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "rule_id": pre_pr_c_rule_id(50, amount_raw, &controlled),
+            "user": CONTROLLED_WALLET_BS58,
+            "executor": CONTROLLED_WALLET_BS58,
+            "delegated_wallet": CONTROLLED_WALLET_BS58,
+            "created_at_slot": created_at_slot,
+            "expires_at_slot": created_at_slot.saturating_add(WATCH_RULE_EXPIRY_SLOTS),
+            "one_shot": true,
+            "condition_logic": "all",
+            "conditions": [{
+                "kind": "solend_reserve_supply_rate",
+                "reserve_pubkey": SOLEND_RESERVE_BS58,
+                "lending_market": SOLEND_LENDING_MARKET_BS58,
+                "solend_program_id": SOLEND_PROGRAM_ID_BS58,
+                "comparison": "gt",
+                "threshold_bps": 50,
+                "rate_kind": "apr",
+                "formula_version": 1,
+                "max_reserve_staleness_slots": 16,
+                "required_refresh_same_tx": true
+            }],
+            "action": {
+                "kind": "solend_withdraw_all_delegated",
+                "target_obligation": SOLEND_TARGET_OBLIGATION_BS58,
+                "reserve_pubkey": SOLEND_RESERVE_BS58,
+                "lending_market": SOLEND_LENDING_MARKET_BS58,
+                "destination_wallet": CONTROLLED_WALLET_BS58,
+                "withdraw_mode": "withdraw_all_delegated_position"
+            },
+            "max_input_amount_raw": amount_raw,
+            "used_amount_raw": 0,
+            "destination": CONTROLLED_WALLET_BS58,
+            "slippage_bps": 0
+        }))
+        .expect("the historical v1 carrier fixture must remain readable")
+    }
+
     #[test]
     fn print_finalize_v2_golden() {
         let proposal = valid_params();
@@ -1756,6 +1809,99 @@ mod tests {
             .await
             .expect("funding lookup")
             .is_none());
+
+        close_test_store(db, watch_rules, funding_intents, sidecar).await;
+    }
+
+    #[tokio::test]
+    async fn same_tuple_v1_collision_preserves_legacy_row_and_issues_no_funding() {
+        let (_file, db, watch_rules, funding_intents, sidecar) = test_store().await;
+        let legacy_rule = legacy_carrier_rule(500_000, FIRST_MARKET_SLOT);
+        let legacy_hash = canonical_rule_hash(&legacy_rule);
+        watch_rules
+            .insert(&legacy_rule)
+            .await
+            .expect("seed the exact historical carrier through the public repository");
+        let params = params_with_id(FIRST_DRAFT_ID);
+        let market = MockMarketSource::new(vec![snapshot(FIRST_MARKET_SLOT, 165, 210)]);
+        let clock = StepClock::new(FINALIZE_STARTED_AT_MS, CLOCK_STEP_MS);
+
+        let response = finalize_intent_json(
+            &params,
+            Some(&market),
+            &sidecar,
+            &watch_rules,
+            &funding_intents,
+            &clock,
+        )
+        .await
+        .expect("a historical id collision is a normal fail-closed response");
+
+        assert_eq!(response["status"], "existing_rule_conflict");
+        assert!(response.get("funding").is_none());
+        assert!(response.get("signing").is_none());
+        assert!(response.get("signing_page_url").is_none());
+        assert!(funding_intents
+            .get(EXPECTED_INTENT_ID)
+            .await
+            .expect("funding lookup")
+            .is_none());
+        let stored = watch_rules
+            .get(&legacy_rule.rule_id)
+            .await
+            .expect("legacy rule lookup")
+            .expect("legacy rule must remain present");
+        assert_eq!(stored.rule, legacy_rule);
+        assert_eq!(stored.canonical_rule_hash, legacy_hash);
+
+        close_test_store(db, watch_rules, funding_intents, sidecar).await;
+    }
+
+    #[tokio::test]
+    async fn historical_v1_and_new_v2_rules_coexist_with_self_describing_versions() {
+        let (_file, db, watch_rules, funding_intents, sidecar) = test_store().await;
+        let legacy_rule = legacy_carrier_rule(100_000, FIRST_MARKET_SLOT - 1_000);
+        let legacy_rule_id = legacy_rule.rule_id;
+        let legacy_hash = canonical_rule_hash(&legacy_rule);
+        watch_rules
+            .insert(&legacy_rule)
+            .await
+            .expect("seed the historical 0.1 USDC v1 specimen");
+        let params = params_with_id(FIRST_DRAFT_ID);
+        let market = MockMarketSource::new(vec![snapshot(FIRST_MARKET_SLOT, 165, 210)]);
+        let clock = StepClock::new(FINALIZE_STARTED_AT_MS, CLOCK_STEP_MS);
+
+        let response = finalize_intent_json(
+            &params,
+            Some(&market),
+            &sidecar,
+            &watch_rules,
+            &funding_intents,
+            &clock,
+        )
+        .await
+        .expect("a distinct v2 tuple must coexist with the historical v1 row");
+
+        assert_eq!(response["status"], "funding_required");
+        let stored_v1 = watch_rules
+            .get(&legacy_rule_id)
+            .await
+            .expect("v1 lookup")
+            .expect("v1 row must remain");
+        let stored_v2 = watch_rules
+            .get(&expected_rule().rule_id)
+            .await
+            .expect("v2 lookup")
+            .expect("v2 row must exist");
+        assert_eq!(stored_v1.rule.schema_version, 1);
+        assert_eq!(stored_v1.canonical_rule_hash, legacy_hash);
+        assert_eq!(stored_v2.rule.schema_version, STAGE2_WATCH_RULE_SCHEMA_V2);
+        assert_eq!(
+            hex_lower(&stored_v2.canonical_rule_hash),
+            EXPECTED_RULE_HASH
+        );
+        assert_ne!(stored_v1.rule.rule_id, stored_v2.rule.rule_id);
+        assert_ne!(stored_v1.canonical_rule_hash, stored_v2.canonical_rule_hash);
 
         close_test_store(db, watch_rules, funding_intents, sidecar).await;
     }
