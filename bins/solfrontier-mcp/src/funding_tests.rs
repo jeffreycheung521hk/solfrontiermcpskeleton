@@ -69,7 +69,7 @@ async fn test_store() -> TestStore {
         protocol: "solend",
         asset: "USDC",
         display_source: "save",
-        comparison: ">",
+        comparison: "gt",
         threshold_bps: 500,
         amount_raw: AMOUNT_RAW,
         expiry_seconds_after_finalize: 180,
@@ -77,7 +77,7 @@ async fn test_store() -> TestStore {
         controlled_usdc_ata: CONTROLLED_USDC_ATA_BS58.to_owned(),
         original_user_message_hash: "11".repeat(32),
     };
-    let rule = build_watch_rule(&draft, 10_000);
+    let rule = build_watch_rule(&draft, 10_000).expect("canonical deposit fixture must map");
     watch.insert(&rule).await.unwrap();
     let intent_id = hex_lower(&rule.rule_id);
     let rule_hash = hex_lower(&canonical_rule_hash(&rule));
