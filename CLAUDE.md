@@ -14,7 +14,7 @@ SolFrontier(前身 ClawSolana / Solfrontier2026)的 MCP 重構版:一個 policy-
 
 繼承原 ARCHITECTURE.md 的 INV-1 ~ INV-8,重點:
 
-- **INV-1** Human signs, AI proposes — 使用者／主錢包一律由人簽;任何 MCP tool 都不得持有使用者私鑰或觸發自動簽名。PR #TBD 唯一允許的窄例外是下文完整記錄的非 MCP `watch --execute` controlled-wallet rail:必須由 operator 明確啟動、只讀取釘死的受控執行錢包 keypair,且仍受 canonical intent、funding、雙時鐘、simulation/policy 與 CAS gate 約束。此例外不得外推成任意 action、任意錢包或 MCP/LLM 可觸發的簽名權。
+- **INV-1** Human signs, AI proposes — 使用者／主錢包一律由人簽;任何 MCP tool 都不得持有使用者私鑰或觸發自動簽名。PR #17 唯一允許的窄例外是下文完整記錄的非 MCP `watch --execute` controlled-wallet rail:必須由 operator 明確啟動、只讀取釘死的受控執行錢包 keypair,且仍受 canonical intent、funding、雙時鐘、simulation/policy 與 CAS gate 約束。此例外不得外推成任意 action、任意錢包或 MCP/LLM 可觸發的簽名權。
 - **INV-2** Typestate 管線(`Proposal → Simulated → Approved → Signed`)不可繞過、不可改造 — `crates/wallet-engine` 是 "do not touch" 區。
 - **INV-3** Audit trail 只加不改(state-store AuditRepository 無 update/delete)。
 - **INV-5** 簽名前必先 simulation,無跳過旗標。
@@ -31,13 +31,13 @@ SolFrontier(前身 ClawSolana / Solfrontier2026)的 MCP 重構版:一個 policy-
 | `bins/solfrontier-mcp` | MCP 入口 | rmcp stdio server;負責 tools、transport、runtime/config 與後端協調 glue,純 protocol logic 下沉 `crates/protocols` |
 | `web/signing-page` | Phase 2 靜態頁 | 單一 HTML 入口 + 本地 vendored JS 的 build-free Phantom 入金目錄;零後端接觸、簽名時不下載外部託管程式碼,由使用者自行以只綁 `127.0.0.1` 且只公開該目錄的靜態伺服器啟動;MCP binary 不開 HTTP port、不自動開瀏覽器 |
 | `crates/protocols/` | Phase 3 進行中 | 純 Jupiter/Solend wire types、decoders 與 unsigned builders;不得依賴 approval/pending state、DB、network、signing 或 submission |
-| `crates/executor` | Phase 3b-1 已交付;Phase 3b-2 execution 由 PR #TBD 引入、真鏈驗收另記 | SDK/DB/RPC 無關的 fail-closed candidate/condition 驗證核心;write-capable lease、simulation、controlled-wallet signing、broadcast 與 finality adapter 只允許留在明確的 bin/runtime 邊界 |
+| `crates/executor` | Phase 3b-1 已交付;Phase 3b-2 execution 由 PR #17 引入、真鏈驗收另記 | SDK/DB/RPC 無關的 fail-closed candidate/condition 驗證核心;write-capable lease、simulation、controlled-wallet signing、broadcast 與 finality adapter 只允許留在明確的 bin/runtime 邊界 |
 
 **禁止**重新引入:自製 LLM client / ReAct loop(舊 agent-runtime)、HTTP API surface(舊 api crate)、chat UI。這些由 MCP host 提供。
 
 `web/signing-page` 是使用者自行啟動的 loopback-only 靜態檔案,不是 MCP HTTP API;不得把其伺服器、路由或自動開瀏覽器邏輯塞進 MCP binary。
 
-## 目前階段:Phase 2 與 Phase 3b-1 已完成;Phase 3b-2 execution 由 PR #TBD 引入、主網驗收待獨立記錄
+## 目前階段:Phase 2 與 Phase 3b-1 已完成;Phase 3b-2 execution 由 PR #17 引入、主網驗收待獨立記錄
 
 Phase 2 已於 2026-07-29 以 0.1 USDC 完成 Solana mainnet 全流程驗收，
 並在 PR #4 合併後於 `main` 重跑完整 gate。公開交易、驗證項目與
@@ -51,7 +51,7 @@ canonical `SolendDeposit` finalize 寫入均已完成。`crates/executor` 與
 signature slots 的不可提交 unsigned transaction;未帶 `--execute` 時
 不讀 keypair、不 lease、不簽名、不廣播且主 DB 零寫入。
 
-PR #TBD 引入 Phase 3b-2 的非 MCP `watch --execute` rail。operator 明確
+PR #17 引入 Phase 3b-2 的非 MCP `watch --execute` rail。operator 明確
 啟動後,每輪必須先完成全批 scan/precheck;若無 scan failed/truncated,
 再對每筆通過者依序做 `budget_reserved → executing` CAS、fresh rebuild、
 stderr 完整交易揭露、wallet-engine simulation、risk-engine policy、
@@ -87,15 +87,15 @@ Phase 2 第一切片 `propose_intent`、第二切片 `finalize_intent` 已完成
 - **與安全偏離的區別:**「全通過才 flip」與「驗證真正出資者」修補的是攻擊者可主動利用的漏洞;commitment 等級則是風險容忍度參數。一般第三方或 MCP 呼叫者無法單方面觸發 Solana 叢集分叉來製造 `confirmed` 回滾。
 - **重新評估觸發條件:**單筆金額超出測試規模,或系統開始管理任何非測試資金時(兩者取最早),必須重新評估並明確決定是否改為等待 `finalized` 後才 flip 到 `budget_reserved`;評審完成前不得默認沿用測試期容忍度。
 
-### Phase 3b-2 controlled-wallet execution 的刻意偏離與已知邊界（PR #TBD）
+### Phase 3b-2 controlled-wallet execution 的刻意偏離與已知邊界（PR #17）
 
 - **偏離內容:**`watch --execute` 不呼叫 `clawsol-authority ExecuteAction`,不讀 `AuthorizationRecord` PDA,也不把 on-chain authority 放進 Solend CPI loop。通過所有 gate 後,由釘死的 controlled-wallet keypair 直接簽署並呼叫 Solend;這必須在文件、audit 與驗收證據中明說,不得包裝成已部署的 user-delegated PDA execution。
-- **理由:**目前部署的 authority action byte 只支援既有 1/2 路徑,Solend CPI builder 仍為 withdraw-only,並不支援 canonical `SolendDeposit=3`。為了驗收已由 Phase 2 funding 綁定、金額受限且可重算的 deposit intent,PR #TBD 採用前身已有 mainnet 證據的 controlled-wallet direct rail,而不是假造一條不存在的 on-chain grant。
-- **相對前身 W5i 的刻意安全偏離:**前身 `stage2_chat_execute.rs:53-59` 明載 deposit 直接使用受控錢包簽名、沒有經過 review pipeline。PR #TBD 不複製該 bypass:它把同一份 fresh unsigned transaction 依序送入 wallet-engine simulation、真實 risk-engine policy、明確為 auto-approved 的 `Approved` typestate,再由包裝 signer 捕捉簽名結果;approved message、signed message 與提交 bytes 內的 message 必須逐位元相同且簽名需通過 `Transaction::verify()`。忠實搬遷不適用於前身違反 INV-2/INV-5 的安全缺陷。
+- **理由:**目前部署的 authority action byte 只支援既有 1/2 路徑,Solend CPI builder 仍為 withdraw-only,並不支援 canonical `SolendDeposit=3`。為了驗收已由 Phase 2 funding 綁定、金額受限且可重算的 deposit intent,PR #17 採用前身已有 mainnet 證據的 controlled-wallet direct rail,而不是假造一條不存在的 on-chain grant。
+- **相對前身 W5i 的刻意安全偏離:**前身 `stage2_chat_execute.rs:53-59` 明載 deposit 直接使用受控錢包簽名、沒有經過 review pipeline。PR #17 不複製該 bypass:它把同一份 fresh unsigned transaction 依序送入 wallet-engine simulation、真實 risk-engine policy、明確為 auto-approved 的 `Approved` typestate,再由包裝 signer 捕捉簽名結果;approved message、signed message 與提交 bytes 內的 message 必須逐位元相同且簽名需通過 `Transaction::verify()`。忠實搬遷不適用於前身違反 INV-2/INV-5 的安全缺陷。
 - **人類可審交易揭露:**CAS 成功後、wallet review 前先以 dry-run 同 schema 輸出完整 placeholder-blockhash shape;simulation 綁定 fresh blockhash 後、policy/signing 前再輸出 exact unsigned message。後者除 blockhash 外必須與 canonical builder message 逐位元相同。任一「簽名前交易 audit」序列化失敗都不得進 signer;安全 release 該 lease 後仍須中止當輪其餘 candidates。若較後面的 execution-attempt report 序列化失敗,同樣中止其餘 candidates並輸出固定錯誤類別,但不得聲稱能回滾已發生的 broadcast 或狀態寫入。
 - **前身實作／意圖矛盾修正（非 DEBT）:**前身 `stage2_chat_execute.rs:1952-1955` 在讀取 `confirmationStatus` 前就以 `err != null` 回傳 terminal `Failed`,但同檔約 `:1054` 的狀態機註解明確宣告該路徑是「tx finalized but failed on-chain」並以 `mark_failed` 結案。Phase 3b-2 依宣告語意收緊:processed/confirmed 即使觀測到 `err` 仍為 pending,不 release、不重播且保持 `executing`;只有 `confirmationStatus == finalized` 且 `err != null` 才 terminal-fail。這與 completed 只接受 finalized 的原則一致,並避免非最終分叉上的暫時失敗污染正式鏈結果。
 - **人類授權邊界:**使用者只以 Phantom 人手簽 funding;主錢包私鑰永不進 daemon。執行端的授權是 operator 明確啟動非 MCP CLI、固定 controlled wallet、精確 canonical identity/三方金額、fresh account/condition/雙時鐘檢查、simulation/policy 與單一 CAS 的交集。MCP host/LLM 不能把一般 tool call 升格成 `--execute`。
-- **限縮與理由終點:**此偏離只覆蓋固定 mainnet Solend USDC deposit 與測試資金,不代表 generic autonomous custody。若要走 Authorization PDA、擴大 action/mint/wallet、管理非測試資金或宣告 production-ready,必須先完成對應鏈上支援／審計及下列 pagination、退款與 crash-recovery 債務;不得以 PR #TBD 的驗收外推。
+- **限縮與理由終點:**此偏離只覆蓋固定 mainnet Solend USDC deposit 與測試資金,不代表 generic autonomous custody。若要走 Authorization PDA、擴大 action/mint/wallet、管理非測試資金或宣告 production-ready,必須先完成對應鏈上支援／審計及下列 pagination、退款與 crash-recovery 債務;不得以 PR #17 的驗收外推。
 
 ## 工程紀律
 
@@ -116,7 +116,7 @@ Phase 2 第一切片 `propose_intent`、第二切片 `finalize_intent` 已完成
 ### DEBT-P3-SCHEMA-1:鏈上 Authorization PDA 尚不支援 SolendDeposit
 
 - **現況:**`ActionSpec` 的 Borsh tag 是 `withdraw=0 / Jupiter=1 / deposit=2`;這與 `WatchRuleActionType::to_u8()` 的鏈下 routing/audit 值 `1 / 2 / 3` 是兩個命名空間。已部署的 `clawsol-authority` 只接受 action byte 1/2,未知值 fail closed,Solend CPI builder 亦仍是 withdraw-only。因此 `SolendDeposit=3` 目前絕不可宣稱為已部署 PDA grant。
-- **目前邊界:**PR #TBD 的 Phase 3b-2 controlled-wallet direct rail 刻意不呼叫 `clawsol-authority` 或 Authorization PDA;它只能依上節的非 MCP、固定錢包、測試資金邊界運作。PR #9 因此只建立鏈下 canonical identity;PR #TBD 亦不得把 direct signature 宣稱為 PDA grant。舊 W5i 雖 import `stage2_executor` 的五個示範常數,但沒有走 `validate_request_shape` 或該授權執行路徑。
+- **目前邊界:**PR #17 的 Phase 3b-2 controlled-wallet direct rail 刻意不呼叫 `clawsol-authority` 或 Authorization PDA;它只能依上節的非 MCP、固定錢包、測試資金邊界運作。PR #9 因此只建立鏈下 canonical identity;PR #17 亦不得把 direct signature 宣稱為 PDA grant。舊 W5i 雖 import `stage2_executor` 的五個示範常數,但沒有走 `validate_request_shape` 或該授權執行路徑。
 - **觸發條件:**若日後任何 Solend deposit 改走 Authorization PDA / `ExecuteAction` 授權路徑,必須先更新、重新部署並獨立審計鏈上程式與 Solend CPI builder,再升 watch-rule schema version;完成前該路徑必須 fail closed。
 
 ### DEBT-P3-SCHEMA-2:SolendDeposit decimals 是執行時推導值
@@ -136,7 +136,7 @@ Phase 2 第一切片 `propose_intent`、第二切片 `finalize_intent` 已完成
 - **現況:**為逐字保留舊 bridge 的非事務語意,finalize 先寫 WatchRule,再寫 sidecar 與 funding intent。若程序在第一個主 DB 寫入後中斷,或後續 funding insert 失敗,會留下沒有 funding row 的 rule-only row;沒有 rollback 或 startup reconciler。
 - **watcher 容錯:**Phase 3b-1 對公開 API 回傳的非終態 WatchRule,找不到 funding row 時明確分類 `orphan_rule_only`,逐列跳過且不做鏈上 account read。dry-run 在物理上沒有 lease、簽名、廣播或主 DB 寫入能力;同一批次另有後續列仍會繼續處理。此證據只涵蓋 oldest-first 的首 128 列,不得宣稱 cursor-complete。
 - **仍保留的測試缺口:**離線測試可用公開 API 種出既存 rule-only row 並驗證 watcher 容錯,但 finalize repositories 仍是具體型別,無法注入「rule insert 成功、funding insert/readback 失敗」的原始中斷點,所以 draft tombstone/collision recovery 的 fault-injection 證據仍缺。不得為測試繞過 repository 邊界或改寫非事務順序。
-- **展期觸發條件（PR #TBD 重議）:**Phase 3b-2 測試資金 rail 以「任一 `*_scan_failed` / `*_scan_truncated` 令全輪 abort、該輪 lease/sign/broadcast 均為零」防止 bounded scan 被誤當完整世界;cursor-complete/reconciliation 義務改由 `DEBT-P2-FUNDING-1` 在非測試資金／production-ready 邊界統一追蹤。故障注入仍在 bin 取得可注入 funding repository seam、state-store 新增正式 transaction/recovery API,或 production-ready(三者取最早)時補齊,並斷言 rule-only row、draft tombstone 與恢復行為。
+- **展期觸發條件（PR #17 重議）:**Phase 3b-2 測試資金 rail 以「任一 `*_scan_failed` / `*_scan_truncated` 令全輪 abort、該輪 lease/sign/broadcast 均為零」防止 bounded scan 被誤當完整世界;cursor-complete/reconciliation 義務改由 `DEBT-P2-FUNDING-1` 在非測試資金／production-ready 邊界統一追蹤。故障注入仍在 bin 取得可注入 funding repository seam、state-store 新增正式 transaction/recovery API,或 production-ready(三者取最早)時補齊,並斷言 rule-only row、draft tombstone 與恢復行為。
 
 ### DEBT-P2-FINALIZE-2（budget_reserved 容錯已交付;原始 orphan 覆蓋/故障注入展期）:funding-only orphan
 
@@ -144,7 +144,7 @@ Phase 2 第一切片 `propose_intent`、第二切片 `finalize_intent` 已完成
 - **watcher 容錯:**sidecar 仍不替 orphan 背書;Phase 3b-1 對列舉到的 `budget_reserved` funding 以公開 `get` 讀回 WatchRule,缺失時明確分類 `orphan_funding_only`,逐列跳過且循環不中斷。離線真 SQLite 測試以公開 API 種出此狀態,並釘死無 account read、無 unsigned transaction 及主 DB 零寫入。
 - **完整覆蓋缺口:**finalize 的原始缺陷實際會留下 `funding_required` orphan;目前凍結 repository 沒有該狀態的 bounded scan,所以 Phase 3b-1 看不到這種原始 orphan。`orphan_funding_only` 名稱只代表被 `list_budget_reserved` 列舉到的子集合,不得宣稱本債已全部清償。
 - **仍保留的測試缺口:**finalize 的純回應 guard 已有測試,但 WatchRule repository 是具體型別,仍無法注入「insert 與 readback 同時失敗」來重演 orphan 的原始建立路徑。既存 orphan 的 watcher 行為已有測試;建立當下的 fault-injection 證據尚未具備。
-- **展期觸發條件（PR #TBD 重議）:**測試資金的 `watch --execute` 遇任一 `*_scan_failed` / `*_scan_truncated` 必須在全輪第一個 lease 前 abort,所以不以 write-capable flag 本身冒充完整 orphan coverage。pagination/逐列隔離改由 `DEBT-P2-FUNDING-1` 在非測試資金／production-ready 邊界統一觸發;WatchRule insert/readback 雙失敗測試仍在 bin 取得可注入 WatchRule repository seam、state-store 新增正式 transaction/recovery API,或 production-ready(三者取最早)時交付,並斷言 orphan row 被保留、finalize 仍回 `rule_unconfirmed` 且不含入金指引。
+- **展期觸發條件（PR #17 重議）:**測試資金的 `watch --execute` 遇任一 `*_scan_failed` / `*_scan_truncated` 必須在全輪第一個 lease 前 abort,所以不以 write-capable flag 本身冒充完整 orphan coverage。pagination/逐列隔離改由 `DEBT-P2-FUNDING-1` 在非測試資金／production-ready 邊界統一觸發;WatchRule insert/readback 雙失敗測試仍在 bin 取得可注入 WatchRule repository seam、state-store 新增正式 transaction/recovery API,或 production-ready(三者取最早)時交付,並斷言 orphan row 被保留、finalize 仍回 `rule_unconfirmed` 且不含入金指引。
 
 ### DEBT-P2-FINALIZE-3（已清償）:persisted funding timestamps 是唯一 wall-clock 權威
 
@@ -164,38 +164,38 @@ Phase 2 第一切片 `propose_intent`、第二切片 `finalize_intent` 已完成
 - **安全邊界:**任何三方不等、非 `SolendDeposit` action,或嘗試以 `used_amount_raw`／executor request 覆蓋該金額都必須 fail closed;不得簽名或取得 execution lease。
 - **觸發條件:**任何引入部分執行(partial fill)、分批執行、剩餘額重試,或允許 `0 < used_amount_raw < max_input_amount_raw` 的變更,必須先重新評審並文件化 canonical action、rule cap、funding amount、實際執行額與退款／會計的關係,按結論升 watch-rule schema version並補齊跨 finalize→funding→executor 的不變量測試;完成前不得放寬三方精確等值。
 
-### DEBT-P3-WATCH-1（PR #TBD 重議）:execute scan flag 全輪 abort;擴容債併入 funding
+### DEBT-P3-WATCH-1（PR #17 重議）:execute scan flag 全輪 abort;擴容債併入 funding
 
-- **仍存在的底層限制:**凍結 repository 的 `list_budget_reserved` 與 `list_pending_lifecycle_limit` 只接受 limit,沒有 cursor/keyset。每類先取 129、明確回報 `*_scan_truncated`,再只處理 oldest-first 128 列;任一損毀列亦會因整批 `collect()` 讓該 table cycle 回 `*_scan_failed`。這些事實沒有被 PR #TBD 修復。
-- **PR #TBD 的 write-capable 邊界:**dry-run 可逐列回報既有 finding,但 `watch --execute` 必須先完成整輪 scan/precheck。只要出現任何 `*_scan_truncated` 或 `*_scan_failed`,整輪在第一個 lease/sign/broadcast 前 abort;不得執行「旗標前已掃到的 ready row」。孤兒分類不是 scan flag,必須逐列跳過並繼續;多筆不同的 ready row 可依序處理。
+- **仍存在的底層限制:**凍結 repository 的 `list_budget_reserved` 與 `list_pending_lifecycle_limit` 只接受 limit,沒有 cursor/keyset。每類先取 129、明確回報 `*_scan_truncated`,再只處理 oldest-first 128 列;任一損毀列亦會因整批 `collect()` 讓該 table cycle 回 `*_scan_failed`。這些事實沒有被 PR #17 修復。
+- **PR #17 的 write-capable 邊界:**dry-run 可逐列回報既有 finding,但 `watch --execute` 必須先完成整輪 scan/precheck。只要出現任何 `*_scan_truncated` 或 `*_scan_failed`,整輪在第一個 lease/sign/broadcast 前 abort;不得執行「旗標前已掃到的 ready row」。孤兒分類不是 scan flag,必須逐列跳過並繼續;多筆不同的 ready row 可依序處理。
 - **重議結論:**全輪 abort 足以讓明確隔離、低筆數、測試資金的 Phase 3b-2 mainnet 驗收 fail closed,但不證明 eventual coverage、損毀列隔離或完整 orphan reconciliation。cursor/keyset pagination 與 row-level decode/error result 不再以「第一個 write-capable flag」為觸發點,改併入 `DEBT-P2-FUNDING-1`,並在管理任何非測試資金或宣告 production-ready 前(兩者取最早)交付與獨立評審。
 
-### DEBT-P3-EXECUTION-1（PR #TBD 新增）:`executing` 沒有 crash recovery / reaper
+### DEBT-P3-EXECUTION-1（PR #17 新增）:`executing` 沒有 crash recovery / reaper
 
 - **目前安全狀態:**execution CAS 必須先把 `budget_reserved → executing` 再簽名。可證明未 broadcast 的 build/simulation/policy failure 才能 release;只有 finalized observation 的明確 `err` 才能 terminal-fail;已取得 signature 但尚未 `finalized`、poll timeout、或 daemon 在 broadcast/完成寫入窗口崩潰時,必須保留 `executing` 作為 ambiguity barrier。任何自動重簽、重送新 message、退回 `budget_reserved` 或退款都可能造成雙重消費。
 - **未來 CAS 注意:**目前公開 funding repository 的 `mark_failed` 並非 `executing`-only CAS。本切片只會在同一 executor 已取得 lease 且觀測到 finalized error 後呼叫它,所以既有測試資金流程沒有合法競爭寫者;但任何未來 reaper、退款或人工 recovery 一旦可與 finality poll 並行,都必須把 terminal failure 改成綁定 `executing`（最好連 signature）的 CAS,並在上述 recovery 觸發點一併測試競爭更新。
-- **尚缺能力:**PR #TBD 不交付 lease TTL、startup reaper、durable signature-first journal 或跨 WatchRule/funding 兩步完成寫入的 crash repair。`executing` row 不再被一般 ready scan 自動執行;mainnet 測試若進入此狀態只能先以已知 signature 做人工鏈上 reconciliation,不得把第二次 `watch --execute` 當 recovery。
+- **尚缺能力:**PR #17 不交付 lease TTL、startup reaper、durable signature-first journal 或跨 WatchRule/funding 兩步完成寫入的 crash repair。`executing` row 不再被一般 ready scan 自動執行;mainnet 測試若進入此狀態只能先以已知 signature 做人工鏈上 reconciliation,不得把第二次 `watch --execute` 當 recovery。
 - **保留的兩步完成缺陷:**finalized success 仍依前身順序先 `WatchRule → completed`,再把 funding row 從 `executing → completed`;兩者不是單一 transaction。第二步零更新或故障時會留下 `rule=completed / funding=executing`,並在回應中明示需人工 reconciliation。這延續 `DEBT-P2-FINALIZE-1/2` 已記錄的跨 repository 非交易式邊界,不得被綠燈成功路徑掩蓋;其修復併入本債的 durable recovery 觸發點。
 - **觸發條件:**首次出現停在 executing 需人工對鏈的實例時，或任何連續值守運行（非驗收場景）開始之前。屆時必須另行交付並評審 durable recovery:枚舉所有 `executing`、保留/恢復 canonical signature、以鏈上 finality 分流 completed/failed/仍 ambiguous、冪等修復兩份完成狀態,且在證明舊交易不可能落鏈前禁止新簽名與退款。測試須覆蓋 lease 後每一個 crash window及兩步寫入中斷。
 
-### DEBT-P3-EXECUTION-2（PR #TBD 新增）:final revalidation 與 funding CAS 不是單一快照
+### DEBT-P3-EXECUTION-2（PR #17 新增）:final revalidation 與 funding CAS 不是單一快照
 
 - **精確現況:**execute process 同時持有 read-only/query-only preflight pool 與 write-capable repository pool。公開 `lease_execution_if_budget_reserved` 的原子 WHERE 只涵蓋 `intent_id`、`status = budget_reserved`、`expires_at_ms > lease_now_ms`;它會排除 execution/refund/status 競爭並在含端點語意下重驗 persisted funding deadline,但不涵蓋 funding hash/amount/wallet 欄位、WatchRule lifecycle/slot deadline或即時 reserve/account/condition facts。
 - **現有緩解與證據邊界:**funding identity/amount/wallet topology 在公開 repository 中沒有 insert 後更新 API;target-specific revalidation 在 CAS 前重新讀 exact row/rule,再取後置 confirmed slot 把守最終 slot/reserve-staleness gate。CAS 後只從保留的 validated canonical plan 組交易,完整輸出後再經 wallet-engine shape/simulation/policy/bytes-identity gate。這能阻止參數替換,但兩個 pool 本身不會令多次讀取與 CAS 成為同一 SQLite transaction,鏈上 facts 亦不可能被該 CAS 鎖住。
 - **具體競爭例:**WatchRule 可在 final revalidation 後、funding CAS 前被 revoke;funding CAS 不含 WatchRule lifecycle predicate,而凍結 repository 的 `mark_completed` 亦沒有 `revoked = 0` WHERE。若交易其後 finalized,目前可形成 `status=completed` 與 `revoked=1` 並存的矛盾 row。測試資金邊界接受此缺口,但不得把 target-specific reread 描述為原子 snapshot。
 - **觸發條件:**首次管理任何非測試資金或宣告 production-ready 前(兩者取最早),必須另行評審並交付正式 snapshot/lease 契約:至少讓可變的 DB eligibility 欄位與 lease 在同一 transaction/CAS 中綁定,明確定義鏈上 condition 的最大 TOCTOU 容忍窗口,並以競爭更新及條件翻轉測試證明 fail-closed。完成前此 rail 只准用測試資金。
 
-### DEBT-P3-KEY-1（PR #TBD 新增）:frozen `SecretKeystore` 內部 key material 零化尚未可證
+### DEBT-P3-KEY-1（PR #17 新增）:frozen `SecretKeystore` 內部 key material 零化尚未可證
 
 - **目前護欄:**bin 只從 `SOLFRONTIER_CONTROLLED_WALLET_KEYPAIR` 載入釘死的 controlled-wallet keypair,且在載入結果成功或失敗後都明確以 `fill(0)` 清除 caller-owned JSON file buffer 與 bin 自行解析的 raw-key `Vec<u8>`。固定錯誤類別與日誌都不得包含 path、key bytes 或 parser/RPC 原文。
 - **證據邊界:**凍結的 `crates/wallet-engine::SecretKeystore` 會把 key material 轉入其內部 `SecretKeypair`/共享儲存,但目前公開 API 與實作沒有提供可由 bin 驗證的 `Zeroize`/`Drop` 保證。caller buffers 已清除不等於 keystore 內部副本已可證零化;本 PR 不為此改動凍結 crate。
 - **觸發條件:**首次管理任何非測試資金或宣告 production-ready 前(兩者取最早),必須獨立覆核並補強 frozen keystore 的 key lifetime/zeroization,以可測試的 `zeroize`/`ZeroizeOnDrop` 或經安全評審的等價機制證明所有內部副本在生命週期結束時清除;完成前不得把 caller-buffer 清零宣稱為完整記憶體零化。
 
-### DEBT-P2-FUNDING-1（PR #TBD 合併掃描債）:過期入金退款與可稽核全量掃描尚未交付
+### DEBT-P2-FUNDING-1（PR #17 合併掃描債）:過期入金退款與可稽核全量掃描尚未交付
 
 - **現況:**funding row 的硬期限為 `expires_at_ms`(目前窗口 180,000ms);WatchRule 另有 `created_at_slot + 480` 的 lease 期限。沿用舊語意,鏈上證據全部正確但在 funding deadline 後才到帳的入金仍會被接受並記錄,但已不能當作正常可執行資金。
 - **目前處理:**`confirm_funding` 以交易 `blockTime`(缺失時才用明確標示的確認時鐘 fallback)對 funding row `expires_at_ms` 判定 late,並回報「此入金於過期後到達,已記錄為可退款;退款目前需人工處理」。回應另行揭露 WatchRule slot deadline;它只決定 executor 能否取得 lease,不取代 funding deadline。
-- **Phase 3b 邊界:**唯讀 watcher 對列舉到且 wall-clock 已到端點的 `budget_reserved` row 回 `wall_clock_expired`;它不呼叫 refund lease/API。PR #TBD 的 execute mode 同樣不得消費 late funding,且任一 `*_scan_failed` / `*_scan_truncated` 都必須全輪 abort。已在其他 expired/refund 狀態的 row 不在目前列舉範圍,所以 dry-run 與測試資金 execution 都不關閉本債。
+- **Phase 3b 邊界:**唯讀 watcher 對列舉到且 wall-clock 已到端點的 `budget_reserved` row 回 `wall_clock_expired`;它不呼叫 refund lease/API。PR #17 的 execute mode 同樣不得消費 late funding,且任一 `*_scan_failed` / `*_scan_truncated` 都必須全輪 abort。已在其他 expired/refund 狀態的 row 不在目前列舉範圍,所以 dry-run 與測試資金 execution 都不關閉本債。
 - **由 DEBT-P3-WATCH-1 合併的掃描債:**兩個 bounded public list API 仍沒有 cursor/keyset,亦沒有逐列 decode/error result;目前的全輪 abort 只防止在不完整視野下簽名,不能提供 eventual coverage、完整 orphan enumeration 或可稽核退款 sweep。未來退款/reconciliation 必須與 pagination、row isolation 一起設計,避免壞列或 oldest-first 飢餓永久遮蔽可退款資金。
 - **風險:**目前沒有自動退款 handler 或已文件化的完整人工退款程序,資金可能停留在 controlled ATA。回應與 README 不得把 late funding 呈現為一般成功或暗示退款已完成。
 - **觸發條件:**展期至獨立 `phase3-refund/reconciliation` 切片;管理任何非測試資金或宣告 production-ready 前(兩者取最早),必須一起交付並評審:(1)自動退款 handler 或明確、可操作且可稽核的人工程序;(2)cursor/keyset pagination;(3)row-level decode/error isolation;(4)證明 eventual coverage、損毀列隔離與完整退款／orphan sweep 的測試。未完成不得讓 executor 消費 late funding,不得宣稱 scan 完整,也不得關閉本債。

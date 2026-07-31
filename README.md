@@ -471,7 +471,7 @@ cursor and deserialize a batch all-or-nothing, so a corrupt row can fail that
 table's entire cycle. In addition, the original finalize-created
 `funding_required` orphan is not enumerable by the available funding scan;
 `orphan_funding_only` covers only enumerated `budget_reserved` rows. These
-limits are tracked in `DEBT-P2-FINALIZE-1/2`; PR #TBD's whole-round execute
+limits are tracked in `DEBT-P2-FINALIZE-1/2`; PR #17's whole-round execute
 abort is recorded in `DEBT-P3-WATCH-1`, while pagination and row-isolation
 ownership now lives in `DEBT-P2-FUNDING-1` in [`CLAUDE.md`](CLAUDE.md). Do not
 infer complete orphan coverage from a green dry-run.
@@ -481,9 +481,9 @@ instruction cross-check are recorded, with their evidence grades kept
 distinct, in
 [`docs/phase3b-dry-run-acceptance.md`](docs/phase3b-dry-run-acceptance.md).
 
-### Phase 3b-2 autonomous controlled-wallet mainnet acceptance (PR #TBD)
+### Phase 3b-2 autonomous controlled-wallet mainnet acceptance (PR #17)
 
-PR #TBD introduces the write-capable implementation; this runbook is not by
+PR #17 introduces the write-capable implementation; this runbook is not by
 itself evidence that a mainnet acceptance run succeeded. That result must be
 recorded separately against the exact post-merge artifact. Here,
 **autonomous** means that after a human funds the bounded intent and explicitly starts
@@ -498,7 +498,7 @@ production-ready or crash-recovering.
 #### Pre-execution checklist
 
 - [ ] Use the Windows release artifact produced by the post-merge `main` run
-      for PR #TBD; record its Actions run id and SHA-256. Use the same SQLite
+      for PR #17; record its Actions run id and SHA-256. Use the same SQLite
       database as `finalize_intent` and `confirm_funding`, and stop any older
       `watch` process before starting the acceptance run.
 - [ ] Set `SOLFRONTIER_RPC_URL` to the intended mainnet endpoint and
