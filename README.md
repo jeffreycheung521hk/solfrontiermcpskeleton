@@ -361,6 +361,67 @@ The completed 0.1 USDC mainnet acceptance and post-merge gate are recorded in
    payment was recorded after expiry but is not normal executable funding;
    refund currently requires manual handling.
 
+### Phase 3b-1 read-only executor dry-run
+
+`watch` is an audit-only subcommand, not an MCP tool and not an execution
+switch. It opens the existing SQLite database with `mode=ro` and
+`PRAGMA query_only=ON`; it does not run migrations, acquire a lease, change
+state, load a keypair, simulate, sign, broadcast, submit, or confirm a
+transaction. There is deliberately no `--execute` flag and this slice does not
+read `SOLFRONTIER_CONTROLLED_WALLET_KEYPAIR`.
+
+Use the release artifact produced by the Windows CI gate. `--once` scans one
+bounded batch and exits; without it the process repeats every 30 seconds:
+
+```powershell
+target\release\solfrontier-mcp.exe --db .\data\solfrontier.db watch --once
+target\release\solfrontier-mcp.exe --db .\data\solfrontier.db watch
+```
+
+Set `SOLFRONTIER_RPC_URL` in the process environment for confirmed slot/account
+reads. The endpoint is never printed. Without it, DB-only blockers such as a
+legacy action, hash mismatch, amount mismatch, or wall-clock expiry remain
+visible, while an otherwise eligible candidate stops at `clock_unavailable`.
+All dry-run JSON is written to **stderr**; stdout stays unused and remains
+reserved for MCP JSON-RPC when the binary runs as the stdio server.
+
+For an eligible schema-v2 `SolendDeposit`, the report revalidates the canonical
+hash, persisted wall-clock deadline, rule slot deadline, exact three-way
+amount, reserve freshness (maximum 16 slots), obligation and token-account
+identities, ATA existence, and the full-precision WAD condition. It then
+assembles exactly:
+
+1. compute-unit limit;
+2. compute-unit price;
+3. Solend `RefreshReserve`;
+4. Solend deposit-reserve-liquidity-and-obligation-collateral.
+
+The report includes every account meta (`pubkey`, `is_signer`, `is_writable`),
+program id, data hex, and serialized transaction bytes. Those bytes are
+intentionally **unsubmitable**: `sendable:false` and
+`recent_blockhash:null` mean the serialized message contains the all-zero
+placeholder blockhash; every allocated signature slot contains only the
+default signature. A signer account meta expresses a future requirement, not
+a signature. Never submit this base64 or patch a blockhash/signature into it.
+A future write-capable executor must revalidate fresh facts and both clocks,
+acquire a separately reviewed CAS lease, rebuild the message, pass the
+simulation/policy typestate, and sign the exact reviewed bytes.
+
+Both public list APIs are bounded. One cycle requests 129 rows, reports
+`*_scan_truncated`, and processes the oldest 128. They currently have no
+cursor and deserialize a batch all-or-nothing, so a corrupt row can fail that
+table's entire cycle. In addition, the original finalize-created
+`funding_required` orphan is not enumerable by the available funding scan;
+`orphan_funding_only` covers only enumerated `budget_reserved` rows. These
+limits are tracked in `DEBT-P2-FINALIZE-1/2` and `DEBT-P3-WATCH-1` in
+[`CLAUDE.md`](CLAUDE.md); do not infer complete orphan coverage from a green
+dry-run.
+
+The real Phase 2 database-copy output and the separate offline `ready`
+instruction cross-check are recorded, with their evidence grades kept
+distinct, in
+[`docs/phase3b-dry-run-acceptance.md`](docs/phase3b-dry-run-acceptance.md).
+
 ### Development smoke-test data
 
 Reusable development fixtures live in `bins/solfrontier-mcp/src/dev_seed.rs`.
