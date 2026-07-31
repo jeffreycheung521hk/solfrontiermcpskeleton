@@ -135,6 +135,12 @@ Phase 2 第一切片 `propose_intent`、第二切片 `finalize_intent` 已完成
 - **關閉方式:**Phase 2 funding(②-3)開工時已補上兩條 finalize-level 離線契約測試。損毀 SQLite fixture 釘死 `sidecar_unavailable`、主 DB 零寫入且無 `funding`/`signing`;`MockMarketSource` 故障 fixture 釘死固定 error class、`draft_consumed:true`、同 draft 不可重用、主 DB 零寫入且無 `funding`/`signing`。
 - **回歸門檻:**後續修改 `IntentSidecar`/claim-to-response 映射、consume-before-market 順序、`FinalizeMarketDataSource` 或錯誤分類/回應欄位時,上述測試必須繼續通過;不可移除或弱化 fail-closed 斷言。
 
+### DEBT-P3-FINALIZE-1:SolendDeposit 目前只允許全額單次執行
+
+- **現況:**PR-C 將同一個精確金額投影到 canonical `ActionSpec::SolendDeposit.input_amount_raw`、`WatchRule.max_input_amount_raw` 與 persisted funding `amount_raw`,並以 finalize 端測試釘死三方精確等值。規則仍為 `one_shot:true`、`used_amount_raw:0`;目前沒有 partial-fill 或分批執行語意。
+- **安全邊界:**任何三方不等、非 `SolendDeposit` action,或嘗試以 `used_amount_raw`／executor request 覆蓋該金額都必須 fail closed;不得簽名或取得 execution lease。
+- **觸發條件:**任何引入部分執行(partial fill)、分批執行、剩餘額重試,或允許 `0 < used_amount_raw < max_input_amount_raw` 的變更,必須先重新評審並文件化 canonical action、rule cap、funding amount、實際執行額與退款／會計的關係,按結論升 watch-rule schema version並補齊跨 finalize→funding→executor 的不變量測試;完成前不得放寬三方精確等值。
+
 ### DEBT-P2-FUNDING-1:過期入金無自動退款 handler
 
 - **現況:**funding row 的硬期限為 `expires_at_ms`(目前窗口 180,000ms);WatchRule 另有 `created_at_slot + 480` 的 lease 期限。沿用舊語意,鏈上證據全部正確但在 funding deadline 後才到帳的入金仍會被接受並記錄,但已不能當作正常可執行資金。

@@ -35,7 +35,7 @@ use claw_state_store::{
 };
 use claw_types::{
     canonical_rule_hash, ActionSpec, Comparison, Condition, ConditionLogic, PubkeyBytes, RateKind,
-    WatchRule, WithdrawMode, STAGE2_WATCH_RULE_SCHEMA_V1,
+    WatchRule, STAGE2_WATCH_RULE_SCHEMA_V2,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -57,13 +57,15 @@ pub(crate) const USDC_MINT_BS58: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwy
 pub(crate) const SOLEND_RESERVE_BS58: &str = "BgxfHJDzm44T7XG68MYKx7YisTjZu73tVovyZSjJMpmw";
 pub(crate) const SOLEND_LENDING_MARKET_BS58: &str = "4UpD2fh7xH3VP9QQaXtsS1YY3bxzWhtfpks7FatyKvdY";
 pub(crate) const SOLEND_PROGRAM_ID_BS58: &str = "So1endDq2YkqhipRh3WViPa8hdiSpxWy6z3Z6tMCpAo";
-pub(crate) const LEGACY_TARGET_OBLIGATION_BS58: &str =
+pub(crate) const SOLEND_TARGET_OBLIGATION_BS58: &str =
     "BdFLjCcP9mCy557vNNGVbTUuvHxXsh8hc6jXzaPra1wN";
 pub(crate) const MEMO_PROGRAM_ID_BS58: &str = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 pub(crate) const WATCH_RULE_EXPIRY_SLOTS: u64 = 480;
 const SIGNING_PAGE_BASE_URL: &str = "http://127.0.0.1:8080/index.html";
 const FUNDING_WINDOW_MS: i64 = 180_000;
 const FUNDING_WINDOW_SECONDS: i64 = FUNDING_WINDOW_MS / 1_000;
+const CANONICAL_DEPOSIT_MAPPING_ERROR: &str =
+    "the approved draft cannot be represented as the canonical SolendDeposit action";
 
 /// All proposal fields stay flat on the MCP wire. The two IDs have distinct
 /// jobs: `draft_id` controls one-shot finalization; `draft_hash` attests the
@@ -154,6 +156,17 @@ where
         }));
     }
 
+    // Fail before claiming the draft or touching the network/main database if
+    // a future proposal shape cannot be represented by the reviewed v2 action.
+    if let Err(reason) = validate_canonical_solend_deposit_draft(&draft) {
+        return Ok(json!({
+            "status": "canonical_action_unsupported",
+            "reason": reason,
+            "draft_consumed": false,
+            "database_writes": 0,
+        }));
+    }
+
     // These are MCP-only preconditions. The predecessor received an already
     // authenticated session wallet and could only start with market wiring
     // present, so consuming a draft for either failure would invent a new
@@ -226,19 +239,37 @@ where
         }
     };
 
-    let fresh_rule = build_watch_rule(&draft, snapshot.last_checked_slot);
+    let fresh_rule = match build_watch_rule(&draft, snapshot.last_checked_slot) {
+        Ok(rule) => rule,
+        Err(reason) => {
+            return Ok(json!({
+                "status": "canonical_action_unsupported",
+                "reason": reason,
+                "draft_consumed": true,
+                "main_database_writes": 0,
+            }));
+        }
+    };
     let (rule_for_identity, rule_persisted) =
         persist_rule_with_legacy_recovery(watch_rules, &fresh_rule).await;
-    if rule_persisted
-        && rule_for_identity != build_watch_rule(&draft, rule_for_identity.created_at_slot)
-    {
+    let expected_rule = build_watch_rule(&draft, rule_for_identity.created_at_slot)
+        .expect("draft was prevalidated");
+    if rule_persisted && rule_for_identity != expected_rule {
         return Ok(json!({
             "status": "existing_rule_conflict",
             "draft_id": params.draft_id,
-            "reason": "the persisted WatchRule with this deterministic id does not match the approved legacy rule shape",
+            "reason": "the persisted WatchRule with this deterministic id does not match the approved canonical SolendDeposit rule shape",
             "draft_consumed": true,
         }));
     }
+    let Some(canonical_amount_raw) = canonical_solend_deposit_amount_raw(&rule_for_identity) else {
+        return Ok(json!({
+            "status": "existing_rule_conflict",
+            "draft_id": params.draft_id,
+            "reason": "the persisted WatchRule violates the exact SolendDeposit action/rule amount invariant",
+            "draft_consumed": true,
+        }));
+    };
     let intent_id = hex_lower(&rule_for_identity.rule_id);
     let rule_hash = hex_lower(&canonical_rule_hash(&rule_for_identity));
 
@@ -281,7 +312,7 @@ where
         user_usdc_ata: user_usdc_ata.to_string(),
         controlled_wallet: CONTROLLED_WALLET_BS58.to_string(),
         controlled_usdc_ata: CONTROLLED_USDC_ATA_BS58.to_string(),
-        amount_raw: draft.amount_raw,
+        amount_raw: canonical_amount_raw,
         threshold_bps: draft.threshold_bps,
         save_display_apy_bps_at_creation: snapshot.save_display_apy_bps,
         native_onchain_apr_bps_at_creation: snapshot.native_onchain_apr_bps,
@@ -450,7 +481,27 @@ fn unconfirmed_rule_guard(
     })
 }
 
-pub(crate) fn build_watch_rule(draft: &DraftIntent, last_checked_slot: u64) -> WatchRule {
+fn validate_canonical_solend_deposit_draft(draft: &DraftIntent) -> Result<(), &'static str> {
+    if draft.action != "deposit"
+        || draft.protocol != "solend"
+        || draft.asset != "USDC"
+        || draft.display_source != "save"
+        || draft.comparison != "gt"
+        || draft.expiry_seconds_after_finalize != 180
+        || draft.controlled_wallet != CONTROLLED_WALLET_BS58
+        || draft.controlled_usdc_ata != CONTROLLED_USDC_ATA_BS58
+    {
+        return Err(CANONICAL_DEPOSIT_MAPPING_ERROR);
+    }
+    Ok(())
+}
+
+pub(crate) fn build_watch_rule(
+    draft: &DraftIntent,
+    last_checked_slot: u64,
+) -> Result<WatchRule, &'static str> {
+    validate_canonical_solend_deposit_draft(draft)?;
+
     let controlled = PubkeyBytes::from_base58(CONTROLLED_WALLET_BS58)
         .expect("hard-coded controlled wallet must parse");
     let reserve =
@@ -459,12 +510,16 @@ pub(crate) fn build_watch_rule(draft: &DraftIntent, last_checked_slot: u64) -> W
         .expect("hard-coded lending market must parse");
     let solend_program_id = PubkeyBytes::from_base58(SOLEND_PROGRAM_ID_BS58)
         .expect("hard-coded Solend program id must parse");
+    let input_mint =
+        PubkeyBytes::from_base58(USDC_MINT_BS58).expect("hard-coded USDC mint must parse");
+    let target_obligation = PubkeyBytes::from_base58(SOLEND_TARGET_OBLIGATION_BS58)
+        .expect("hard-coded target obligation must parse");
+    let input_amount_raw = draft.amount_raw;
 
-    WatchRule {
-        // Compatibility pin: PR #9 introduces schema v2, but this legacy
-        // placeholder remains a v1 write until PR-C replaces it atomically
-        // with a canonical SolendDeposit action.
-        schema_version: STAGE2_WATCH_RULE_SCHEMA_V1,
+    Ok(WatchRule {
+        // PR #12 closes the predecessor's first-class action gap: finalized
+        // deposits now bind all six execution inputs in schema v2.
+        schema_version: STAGE2_WATCH_RULE_SCHEMA_V2,
         rule_id: derive_rule_id(draft.threshold_bps, draft.amount_raw, &controlled),
         user: controlled,
         executor: controlled,
@@ -484,21 +539,19 @@ pub(crate) fn build_watch_rule(draft: &DraftIntent, last_checked_slot: u64) -> W
             max_reserve_staleness_slots: 16,
             required_refresh_same_tx: true,
         }],
-        // Exact legacy carrier. Phase 3 must replace it only through a
-        // separately reviewed canonical schema boundary.
-        action: ActionSpec::SolendWithdrawAllDelegated {
-            target_obligation: PubkeyBytes::from_base58(LEGACY_TARGET_OBLIGATION_BS58)
-                .expect("hard-coded target obligation must parse"),
+        action: ActionSpec::SolendDeposit {
+            target_obligation,
             reserve_pubkey: reserve,
             lending_market,
-            destination_wallet: controlled,
-            withdraw_mode: WithdrawMode::WithdrawAllDelegatedPosition,
+            solend_program_id,
+            input_mint,
+            input_amount_raw,
         },
-        max_input_amount_raw: draft.amount_raw,
+        max_input_amount_raw: input_amount_raw,
         used_amount_raw: 0,
         destination: controlled,
         slippage_bps: 0,
-    }
+    })
 }
 
 fn derive_rule_id(
@@ -575,7 +628,7 @@ fn funding_row_matches_identity(
             .eq_ignore_ascii_case(rule_hash)
         || funding.controlled_wallet != CONTROLLED_WALLET_BS58
         || funding.controlled_usdc_ata != CONTROLLED_USDC_ATA_BS58
-        || funding.amount_raw != rule.max_input_amount_raw
+        || !has_exact_solend_deposit_amount_invariant(rule, funding.amount_raw)
     {
         return false;
     }
@@ -605,6 +658,19 @@ fn funding_row_matches_identity(
         == funding.user_usdc_ata
 }
 
+fn canonical_solend_deposit_amount_raw(rule: &WatchRule) -> Option<u64> {
+    match &rule.action {
+        ActionSpec::SolendDeposit {
+            input_amount_raw, ..
+        } if *input_amount_raw == rule.max_input_amount_raw => Some(*input_amount_raw),
+        _ => None,
+    }
+}
+
+fn has_exact_solend_deposit_amount_invariant(rule: &WatchRule, funding_amount_raw: u64) -> bool {
+    canonical_solend_deposit_amount_raw(rule) == Some(funding_amount_raw)
+}
+
 fn is_v4_uuid(value: &str) -> bool {
     Uuid::parse_str(value)
         .ok()
@@ -626,11 +692,12 @@ mod tests {
     use super::*;
     use crate::{
         finalize_market::{FinalizeMarketReadError, FinalizeMarketSnapshot},
-        propose::tests::valid_params,
+        propose::{propose_intent_json, tests::valid_params},
         sidecar::{derive_sidecar_path, HashLookup},
         status::query_intent_status,
     };
     use claw_state_store::{Database, DatabaseConfig};
+    use claw_types::canonical_rule_bytes;
     use std::{
         fs,
         path::PathBuf,
@@ -642,8 +709,10 @@ mod tests {
     const SECOND_DRAFT_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const THIRD_DRAFT_ID: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
     const EXPECTED_INTENT_ID: &str = "3200000020a10700000000009a62dace";
+    // Generated by:
+    // cargo test -p solfrontier-mcp finalize::tests::print_finalize_v2_golden -- --nocapture
     const EXPECTED_RULE_HASH: &str =
-        "e87caf01e34d978b144909d248e38f367d794e622318832f1a6ba3ecf5c7e389";
+        "25a8cee58db0e6a722afbeb76da9fbcf073e2de44a03101105b75ff3952ec52c";
     const EXPECTED_USER_USDC_ATA: &str = "4bDArC4UVoBjecHUZaCKqhuhTYPoiKS4qpQQpxuvm1qn";
     const FINALIZE_STARTED_AT_MS: i64 = 1_700_000_000_000;
     const CLOCK_STEP_MS: i64 = 1_000;
@@ -782,6 +851,24 @@ mod tests {
         }
     }
 
+    fn params_from_propose_response() -> FinalizeIntentParams {
+        let proposal = valid_params();
+        let response = propose_intent_json(&proposal);
+        assert_eq!(response["status"], "ok");
+        FinalizeIntentParams {
+            proposal,
+            draft_id: response["draft_id"]
+                .as_str()
+                .expect("propose must return a draft id")
+                .to_owned(),
+            draft_hash: response["draft_hash"]
+                .as_str()
+                .expect("propose must return a draft hash")
+                .to_owned(),
+            user_wallet: TEST_USER_WALLET.to_owned(),
+        }
+    }
+
     fn params_json_with_id(draft_id: &str) -> Value {
         let params = params_with_id(draft_id);
         json!({
@@ -817,7 +904,7 @@ mod tests {
         let lending_market =
             PubkeyBytes::from_base58(SOLEND_LENDING_MARKET_BS58).expect("pinned lending market");
         WatchRule {
-            schema_version: STAGE2_WATCH_RULE_SCHEMA_V1,
+            schema_version: STAGE2_WATCH_RULE_SCHEMA_V2,
             rule_id: [
                 0x32, 0x00, 0x00, 0x00, 0x20, 0xa1, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x9a, 0x62,
                 0xda, 0xce,
@@ -841,19 +928,146 @@ mod tests {
                 max_reserve_staleness_slots: 16,
                 required_refresh_same_tx: true,
             }],
-            action: ActionSpec::SolendWithdrawAllDelegated {
-                target_obligation: PubkeyBytes::from_base58(LEGACY_TARGET_OBLIGATION_BS58)
+            action: ActionSpec::SolendDeposit {
+                target_obligation: PubkeyBytes::from_base58(SOLEND_TARGET_OBLIGATION_BS58)
                     .expect("pinned target obligation"),
                 reserve_pubkey: reserve,
                 lending_market,
-                destination_wallet: controlled,
-                withdraw_mode: WithdrawMode::WithdrawAllDelegatedPosition,
+                solend_program_id: PubkeyBytes::from_base58(SOLEND_PROGRAM_ID_BS58)
+                    .expect("pinned Solend program"),
+                input_mint: PubkeyBytes::from_base58(USDC_MINT_BS58).expect("pinned USDC mint"),
+                input_amount_raw: 500_000,
             },
             max_input_amount_raw: 500_000,
             used_amount_raw: 0,
             destination: controlled,
             slippage_bps: 0,
         }
+    }
+
+    fn pre_pr_c_rule_id(
+        threshold_bps: u32,
+        amount_raw: u64,
+        controlled_wallet: &PubkeyBytes,
+    ) -> [u8; 16] {
+        let mut rule_id = [0_u8; 16];
+        rule_id[0..4].copy_from_slice(&threshold_bps.to_le_bytes());
+        rule_id[4..12].copy_from_slice(&amount_raw.to_le_bytes());
+        rule_id[12..16].copy_from_slice(&controlled_wallet.0[0..4]);
+        rule_id
+    }
+
+    fn legacy_carrier_rule(amount_raw: u64, created_at_slot: u64) -> WatchRule {
+        let controlled =
+            PubkeyBytes::from_base58(CONTROLLED_WALLET_BS58).expect("pinned controlled wallet");
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "rule_id": pre_pr_c_rule_id(50, amount_raw, &controlled),
+            "user": CONTROLLED_WALLET_BS58,
+            "executor": CONTROLLED_WALLET_BS58,
+            "delegated_wallet": CONTROLLED_WALLET_BS58,
+            "created_at_slot": created_at_slot,
+            "expires_at_slot": created_at_slot.saturating_add(WATCH_RULE_EXPIRY_SLOTS),
+            "one_shot": true,
+            "condition_logic": "all",
+            "conditions": [{
+                "kind": "solend_reserve_supply_rate",
+                "reserve_pubkey": SOLEND_RESERVE_BS58,
+                "lending_market": SOLEND_LENDING_MARKET_BS58,
+                "solend_program_id": SOLEND_PROGRAM_ID_BS58,
+                "comparison": "gt",
+                "threshold_bps": 50,
+                "rate_kind": "apr",
+                "formula_version": 1,
+                "max_reserve_staleness_slots": 16,
+                "required_refresh_same_tx": true
+            }],
+            "action": {
+                "kind": "solend_withdraw_all_delegated",
+                "target_obligation": SOLEND_TARGET_OBLIGATION_BS58,
+                "reserve_pubkey": SOLEND_RESERVE_BS58,
+                "lending_market": SOLEND_LENDING_MARKET_BS58,
+                "destination_wallet": CONTROLLED_WALLET_BS58,
+                "withdraw_mode": "withdraw_all_delegated_position"
+            },
+            "max_input_amount_raw": amount_raw,
+            "used_amount_raw": 0,
+            "destination": CONTROLLED_WALLET_BS58,
+            "slippage_bps": 0
+        }))
+        .expect("the historical v1 carrier fixture must remain readable")
+    }
+
+    #[test]
+    fn print_finalize_v2_golden() {
+        let proposal = valid_params();
+        let (draft, _) = validate_and_hash_draft(&proposal).expect("valid proposal must hash");
+        let rule =
+            build_watch_rule(&draft, FIRST_MARKET_SLOT).expect("approved draft must map to v2");
+
+        println!(
+            "canonical_rule_bytes_hex={}",
+            hex_lower(&canonical_rule_bytes(&rule))
+        );
+        println!(
+            "canonical_rule_hash_hex={}",
+            hex_lower(&canonical_rule_hash(&rule))
+        );
+        assert_eq!(
+            hex_lower(&canonical_rule_hash(&rule)),
+            EXPECTED_RULE_HASH,
+            "replace the placeholder only with this program-generated value"
+        );
+    }
+
+    #[test]
+    fn unsupported_draft_shape_cannot_build_a_watch_rule() {
+        let proposal = valid_params();
+        let (draft, _) = validate_and_hash_draft(&proposal).expect("valid proposal must hash");
+
+        let mut unsupported_action = draft.clone();
+        unsupported_action.action = "withdraw";
+        assert_eq!(
+            build_watch_rule(&unsupported_action, FIRST_MARKET_SLOT)
+                .expect_err("an unsupported action must fail closed"),
+            CANONICAL_DEPOSIT_MAPPING_ERROR
+        );
+
+        let mut unsupported_protocol = draft;
+        unsupported_protocol.protocol = "unknown";
+        assert_eq!(
+            build_watch_rule(&unsupported_protocol, FIRST_MARKET_SLOT)
+                .expect_err("an unsupported protocol must fail closed"),
+            CANONICAL_DEPOSIT_MAPPING_ERROR
+        );
+    }
+
+    #[test]
+    fn exact_deposit_amount_invariant_rejects_each_mismatch() {
+        let rule = expected_rule();
+        assert!(has_exact_solend_deposit_amount_invariant(&rule, 500_000));
+
+        let mut wrong_action_amount = rule.clone();
+        let ActionSpec::SolendDeposit {
+            input_amount_raw, ..
+        } = &mut wrong_action_amount.action
+        else {
+            panic!("fixture must be a canonical deposit");
+        };
+        *input_amount_raw += 1;
+        assert!(!has_exact_solend_deposit_amount_invariant(
+            &wrong_action_amount,
+            500_000
+        ));
+
+        let mut wrong_rule_cap = rule.clone();
+        wrong_rule_cap.max_input_amount_raw += 1;
+        assert!(!has_exact_solend_deposit_amount_invariant(
+            &wrong_rule_cap,
+            500_000
+        ));
+
+        assert!(!has_exact_solend_deposit_amount_invariant(&rule, 500_001));
     }
 
     fn signing_page_payload(response: &Value) -> Value {
@@ -902,6 +1116,18 @@ mod tests {
         assert!(
             message.contains("unknown field") && message.contains("unexpected_field"),
             "unexpected deserialization error: {message}"
+        );
+    }
+
+    #[test]
+    fn finalize_params_reject_unsupported_action_instead_of_falling_back() {
+        let mut unsupported = params_json_with_id(FIRST_DRAFT_ID);
+        unsupported["action"] = json!("withdraw");
+        let error = serde_json::from_value::<FinalizeIntentParams>(unsupported)
+            .expect_err("the typed wire schema must reject an unsupported action");
+        assert!(
+            error.to_string().contains("unknown variant"),
+            "unexpected deserialization error: {error}"
         );
     }
 
@@ -1201,7 +1427,7 @@ mod tests {
     #[tokio::test]
     async fn successful_finalize_persists_exact_golden_rows_and_hash_lookup() {
         let (file, db, watch_rules, funding_intents, sidecar) = test_store().await;
-        let params = params_with_id(FIRST_DRAFT_ID);
+        let params = params_from_propose_response();
         let market = MockMarketSource::new(vec![snapshot(FIRST_MARKET_SLOT, 165, 210)]);
         let clock = StepClock::new(FINALIZE_STARTED_AT_MS, CLOCK_STEP_MS);
 
@@ -1361,6 +1587,7 @@ mod tests {
             Some(EXPECTED_RULE_HASH)
         );
         assert_eq!(status.amount_raw, Some(500_000));
+        assert_eq!(status.input_mint.as_deref(), Some(USDC_MINT_BS58));
 
         close_test_store(db, watch_rules, funding_intents, sidecar).await;
         drop(file);
@@ -1586,11 +1813,104 @@ mod tests {
         close_test_store(db, watch_rules, funding_intents, sidecar).await;
     }
 
+    #[tokio::test]
+    async fn same_tuple_v1_collision_preserves_legacy_row_and_issues_no_funding() {
+        let (_file, db, watch_rules, funding_intents, sidecar) = test_store().await;
+        let legacy_rule = legacy_carrier_rule(500_000, FIRST_MARKET_SLOT);
+        let legacy_hash = canonical_rule_hash(&legacy_rule);
+        watch_rules
+            .insert(&legacy_rule)
+            .await
+            .expect("seed the exact historical carrier through the public repository");
+        let params = params_with_id(FIRST_DRAFT_ID);
+        let market = MockMarketSource::new(vec![snapshot(FIRST_MARKET_SLOT, 165, 210)]);
+        let clock = StepClock::new(FINALIZE_STARTED_AT_MS, CLOCK_STEP_MS);
+
+        let response = finalize_intent_json(
+            &params,
+            Some(&market),
+            &sidecar,
+            &watch_rules,
+            &funding_intents,
+            &clock,
+        )
+        .await
+        .expect("a historical id collision is a normal fail-closed response");
+
+        assert_eq!(response["status"], "existing_rule_conflict");
+        assert!(response.get("funding").is_none());
+        assert!(response.get("signing").is_none());
+        assert!(response.get("signing_page_url").is_none());
+        assert!(funding_intents
+            .get(EXPECTED_INTENT_ID)
+            .await
+            .expect("funding lookup")
+            .is_none());
+        let stored = watch_rules
+            .get(&legacy_rule.rule_id)
+            .await
+            .expect("legacy rule lookup")
+            .expect("legacy rule must remain present");
+        assert_eq!(stored.rule, legacy_rule);
+        assert_eq!(stored.canonical_rule_hash, legacy_hash);
+
+        close_test_store(db, watch_rules, funding_intents, sidecar).await;
+    }
+
+    #[tokio::test]
+    async fn historical_v1_and_new_v2_rules_coexist_with_self_describing_versions() {
+        let (_file, db, watch_rules, funding_intents, sidecar) = test_store().await;
+        let legacy_rule = legacy_carrier_rule(100_000, FIRST_MARKET_SLOT - 1_000);
+        let legacy_rule_id = legacy_rule.rule_id;
+        let legacy_hash = canonical_rule_hash(&legacy_rule);
+        watch_rules
+            .insert(&legacy_rule)
+            .await
+            .expect("seed the historical 0.1 USDC v1 specimen");
+        let params = params_with_id(FIRST_DRAFT_ID);
+        let market = MockMarketSource::new(vec![snapshot(FIRST_MARKET_SLOT, 165, 210)]);
+        let clock = StepClock::new(FINALIZE_STARTED_AT_MS, CLOCK_STEP_MS);
+
+        let response = finalize_intent_json(
+            &params,
+            Some(&market),
+            &sidecar,
+            &watch_rules,
+            &funding_intents,
+            &clock,
+        )
+        .await
+        .expect("a distinct v2 tuple must coexist with the historical v1 row");
+
+        assert_eq!(response["status"], "funding_required");
+        let stored_v1 = watch_rules
+            .get(&legacy_rule_id)
+            .await
+            .expect("v1 lookup")
+            .expect("v1 row must remain");
+        let stored_v2 = watch_rules
+            .get(&expected_rule().rule_id)
+            .await
+            .expect("v2 lookup")
+            .expect("v2 row must exist");
+        assert_eq!(stored_v1.rule.schema_version, 1);
+        assert_eq!(stored_v1.canonical_rule_hash, legacy_hash);
+        assert_eq!(stored_v2.rule.schema_version, STAGE2_WATCH_RULE_SCHEMA_V2);
+        assert_eq!(
+            hex_lower(&stored_v2.canonical_rule_hash),
+            EXPECTED_RULE_HASH
+        );
+        assert_ne!(stored_v1.rule.rule_id, stored_v2.rule.rule_id);
+        assert_ne!(stored_v1.canonical_rule_hash, stored_v2.canonical_rule_hash);
+
+        close_test_store(db, watch_rules, funding_intents, sidecar).await;
+    }
+
     #[test]
     fn watch_rule_expiry_slot_saturates_at_u64_max() {
         let proposal = valid_params();
         let (draft, _) = validate_and_hash_draft(&proposal).expect("valid proposal must hash");
-        let rule = build_watch_rule(&draft, u64::MAX - 100);
+        let rule = build_watch_rule(&draft, u64::MAX - 100).expect("approved draft must map to v2");
 
         assert_eq!(rule.created_at_slot, u64::MAX - 100);
         assert_eq!(rule.expires_at_slot, u64::MAX);
