@@ -361,14 +361,63 @@ The completed 0.1 USDC mainnet acceptance and post-merge gate are recorded in
    payment was recorded after expiry but is not normal executable funding;
    refund currently requires manual handling.
 
-### Phase 3b-1 read-only executor dry-run
+### Phase 3b watcher: default dry-run and explicit execution
 
-`watch` is an audit-only subcommand, not an MCP tool and not an execution
-switch. It opens the existing SQLite database with `mode=ro` and
-`PRAGMA query_only=ON`; it does not run migrations, acquire a lease, change
+`watch` is a non-MCP operator subcommand. Without `--execute` it is an
+audit-only dry-run: it opens the existing SQLite database with `mode=ro` and
+`PRAGMA query_only=ON`, and it cannot run migrations, acquire a lease, change
 state, load a keypair, simulate, sign, broadcast, submit, or confirm a
-transaction. There is deliberately no `--execute` flag and this slice does not
-read `SOLFRONTIER_CONTROLLED_WALLET_KEYPAIR`.
+transaction. It does not read `SOLFRONTIER_CONTROLLED_WALLET_KEYPAIR` in this
+default mode.
+
+Only the explicit `watch --execute` form constructs the separately reviewed
+write-capable path. That mode revalidates the entire bounded scan result and
+each candidate, acquires the CAS lease, assembles and prints the complete
+unsigned shape, then lets wallet-engine attach a fresh blockhash and pass that
+exact transaction through simulation, a real risk-engine policy, and the
+`Approved` typestate before the pinned controlled wallet signs. The captured
+signed message is checked against the approved message and the exact submitted
+bytes before one-shot broadcast. This is a deliberate security correction
+relative to the predecessor W5i direct-sign bypass.
+
+The execute preflight report says
+`database_access: "sqlite_read_only_preflight_with_execute_writer"`: its
+candidate reads still use the `mode=ro`/`query_only` pool, but the same process
+has already opened a separate write-capable state-store pool for CAS and
+terminal transitions. This is an RO/RW dual-pool design, not two fixed SQLite
+connections: the read pool is capped at one connection, while the writer uses
+the state-store default pool capacity. After a candidate wins the CAS—and before the wallet
+review/sign call—the watcher prints the complete freshly revalidated unsigned
+transaction to stderr in the same schema as dry-run (four instructions, every
+account meta, program ids, data hex, fee payer, amount, and serialized bytes).
+After successful simulation attaches the fresh blockhash, it prints a second
+report in that same schema containing the exact unsigned message entering
+policy approval and signing. The wallet also normalizes only that blockhash
+and byte-compares the rest of the message with the canonical builder output.
+If either audit report cannot be serialized, signing is not called, the
+pre-broadcast lease is released, and no later candidate in that cycle runs.
+
+The two SQLite pools do not make all preceding reads atomic with the lease.
+The public CAS is exactly `intent_id = ? AND status = 'budget_reserved' AND
+expires_at_ms > lease_now_ms`: it atomically excludes a competing
+execution/refund/status transition and rechecks the persisted funding deadline
+at the inclusive endpoint. It does **not** predicate the funding hash, amount,
+wallet topology, WatchRule lifecycle/slot deadline, or live reserve/account
+facts. Funding identity/amount/wallet fields have no mutation path in the
+public repository after insertion, but WatchRule and chain facts are separate
+state. A target-specific read immediately before CAS minimizes that TOCTOU
+window; the canonical transaction and post-CAS wallet checks prevent parameter
+substitution, but do not turn those separate facts into one database
+transaction. This is an accepted test-funds boundary, tracked as
+`DEBT-P3-EXECUTION-2`; it must be redesigned before non-test custody or a
+production-ready claim.
+
+The execution path still does **not** call `clawsol-authority` or consume an
+Authorization PDA: it is a narrowly bounded, operator-started controlled-wallet
+rail, not an on-chain user-delegated grant. The bin clears both caller-owned key
+JSON bytes and its parsed raw-key buffer, but zeroization of key material held
+inside the frozen `SecretKeystore` is not yet independently proven; use test
+funds only and see `DEBT-P3-KEY-1` in [`CLAUDE.md`](CLAUDE.md).
 
 Use the release artifact produced by the Windows CI gate. `--once` scans one
 bounded batch and exits; without it the process repeats every 30 seconds:
@@ -396,16 +445,25 @@ assembles exactly:
 3. Solend `RefreshReserve`;
 4. Solend deposit-reserve-liquidity-and-obligation-collateral.
 
-The report includes every account meta (`pubkey`, `is_signer`, `is_writable`),
+The dry-run report includes every account meta (`pubkey`, `is_signer`, `is_writable`),
 program id, data hex, and serialized transaction bytes. Those bytes are
 intentionally **unsubmitable**: `sendable:false` and
 `recent_blockhash:null` mean the serialized message contains the all-zero
 placeholder blockhash; every allocated signature slot contains only the
 default signature. A signer account meta expresses a future requirement, not
 a signature. Never submit this base64 or patch a blockhash/signature into it.
-A future write-capable executor must revalidate fresh facts and both clocks,
-acquire a separately reviewed CAS lease, rebuild the message, pass the
-simulation/policy typestate, and sign the exact reviewed bytes.
+The explicit `--execute` path does not submit the dry-run placeholder. It
+revalidates fresh facts and both clocks, acquires the CAS lease, assembles and
+prints the same complete shape again, then lets the wallet pipeline attach a
+fresh blockhash for simulation. It prints that exact fresh-blockhash unsigned
+message before policy/signing and signs only those approved bytes.
+
+Finality is symmetric for terminal success and failure. A processed or
+confirmed observation remains pending even when it contains a transaction
+error; the watcher keeps the row `executing`, does not rebroadcast, and keeps
+polling the same deterministic signature. Only a finalized success completes
+the intent, and only a finalized error marks it failed. If the polling budget
+expires first, the result remains unknown and requires manual reconciliation.
 
 Both public list APIs are bounded. One cycle requests 129 rows, reports
 `*_scan_truncated`, and processes the oldest 128. They currently have no
@@ -413,14 +471,134 @@ cursor and deserialize a batch all-or-nothing, so a corrupt row can fail that
 table's entire cycle. In addition, the original finalize-created
 `funding_required` orphan is not enumerable by the available funding scan;
 `orphan_funding_only` covers only enumerated `budget_reserved` rows. These
-limits are tracked in `DEBT-P2-FINALIZE-1/2` and `DEBT-P3-WATCH-1` in
-[`CLAUDE.md`](CLAUDE.md); do not infer complete orphan coverage from a green
-dry-run.
+limits are tracked in `DEBT-P2-FINALIZE-1/2`; PR #TBD's whole-round execute
+abort is recorded in `DEBT-P3-WATCH-1`, while pagination and row-isolation
+ownership now lives in `DEBT-P2-FUNDING-1` in [`CLAUDE.md`](CLAUDE.md). Do not
+infer complete orphan coverage from a green dry-run.
 
 The real Phase 2 database-copy output and the separate offline `ready`
 instruction cross-check are recorded, with their evidence grades kept
 distinct, in
 [`docs/phase3b-dry-run-acceptance.md`](docs/phase3b-dry-run-acceptance.md).
+
+### Phase 3b-2 autonomous controlled-wallet mainnet acceptance (PR #TBD)
+
+PR #TBD introduces the write-capable implementation; this runbook is not by
+itself evidence that a mainnet acceptance run succeeded. That result must be
+recorded separately against the exact post-merge artifact. Here,
+**autonomous** means that after a human funds the bounded intent and explicitly starts
+`watch --execute`, one watcher round performs condition revalidation, the CAS
+lease, simulation/policy checks, controlled-wallet signing, broadcast, and
+finality polling without a manual database transition. It does not mean that
+an MCP tool or the user's main wallet signs automatically.
+
+Use mainnet test funds only. A successful test does not make this rail
+production-ready or crash-recovering.
+
+#### Pre-execution checklist
+
+- [ ] Use the Windows release artifact produced by the post-merge `main` run
+      for PR #TBD; record its Actions run id and SHA-256. Use the same SQLite
+      database as `finalize_intent` and `confirm_funding`, and stop any older
+      `watch` process before starting the acceptance run.
+- [ ] Set `SOLFRONTIER_RPC_URL` to the intended mainnet endpoint and
+      `SOLFRONTIER_CONTROLLED_WALLET_KEYPAIR` to the pinned controlled-wallet
+      keypair path. Do not print, copy into chat, or commit either value.
+- [ ] Verify that the keypair pubkey is exactly
+      `BPfDMmeMBmCbMC1rWh7hwigMBoKGBrKwXxSeUu9hhs5L`, that this wallet has
+      enough SOL for fees, and that the pinned USDC source ATA, Solend
+      obligation, and collateral ATA all pass the read-only watcher checks.
+- [ ] Do **not** reuse the Phase 2 `0.1 USDC / 50 bps` specimen. The recommended
+      acceptance tuple is `0.2 USDC / 40 bps`
+      (`amount_raw = 200000`), whose prospective deterministic identity is
+      `28000000400d0300000000009a62dace`. Use it only if
+      `get_intent_status` returns `status: "not_found"`.
+- [ ] Precheck the live Save display APY before proposing. It must be strictly
+      greater than the selected threshold with enough margin to remain true
+      through funding and execution. If `40 bps` is not suitable or its
+      identity already exists, choose a fresh non-`50 bps` threshold and
+      recompute/check the prospective identity; never overwrite an old row.
+- [ ] Keep the signing page ready and confirm that the funding wallet,
+      controlled ATA, full Memo, exact amount, and remaining wall-clock window
+      match the finalized response before signing.
+- [ ] Plan to finish proposal, funding confirmation, and execution within both
+      persisted deadlines. If the read-only precheck reports insufficient
+      wall-clock or slot headroom, stop and restart from `propose_intent` with a
+      fresh unused tuple. Never extend a deadline or repair status with SQL.
+- [ ] Require one complete read-only `watch --once` precheck with no
+      `*_scan_failed` or `*_scan_truncated`. Orphan rows are classified and
+      skipped per row; they do not abort the cycle. Review every reported
+      `ready` row because execute mode may process multiple ready intents
+      sequentially. Either scan flag makes the whole write-capable round
+      ineligible before any lease or signature.
+- [ ] Take any desired evidence backup while the process is stopped, but make
+      **zero manual database changes**. Do not use `sqlite3`, direct SQL,
+      `dev_seed`, or repository test helpers to create, lease, complete, or
+      repair the acceptance row.
+
+#### Mainnet acceptance sequence
+
+1. Call `get_intent_status` for
+   `28000000400d0300000000009a62dace` and continue only on
+   `status: "not_found"`. Precheck the live Save APY and controlled-wallet
+   account prerequisites described above.
+2. Call `propose_intent` for a `0.2` USDC Solend deposit with
+   `threshold_bps: 40`, then immediately call `finalize_intent` with the exact
+   returned draft fields and the Phantom funding wallet. Approve only the
+   normal host database-write confirmation.
+3. Open the returned loopback signing-page URL, have the registered human
+   wallet sign the exact `0.2` USDC funding transaction, and call
+   `confirm_funding` with that signature. If it returns
+   `pending_confirmation`, retry the same signature; never sign a second
+   payment. Continue only when `get_intent_status` reports
+   `status: "budget_reserved"` and the WatchRule identity and
+   `amount_raw = 200000` still match.
+4. Run the read-only precheck against that same database:
+
+   ```powershell
+   target\release\solfrontier-mcp.exe --db .\data\solfrontier.db watch --once
+   ```
+
+   Continue only if the target is `ready`, its condition is still true, all
+   account/amount/hash checks pass, both windows have enough headroom, and the
+   report contains neither `*_scan_failed` nor `*_scan_truncated`. Orphans are
+   reported and skipped; they are not a whole-cycle blocker. If multiple rows
+   are ready, inspect all of them because execute mode processes them
+   sequentially. If the target is not ready, stop; do not mutate the row to
+   make it executable.
+5. Start one write-capable watcher round. The acceptance run uses `--once` to
+   isolate a single reviewed cycle; the operative mode is `watch --execute`:
+
+   ```powershell
+   target\release\solfrontier-mcp.exe --db .\data\solfrontier.db watch --execute --once
+   ```
+
+   Do not run a second executor in parallel and do not make any manual DB
+   transition while it is running.
+6. Require the execution report to carry one transaction signature and an
+   unambiguous **finalized** result. `confirmed`, `pending`, a polling timeout,
+   or an `executing` row is not acceptance success and must not be followed by
+   an automatic second transaction.
+7. Using only public status/RPC reads, verify all of the following:
+
+   - the reported signature is finalized on mainnet with `err: null`;
+   - the exact `200000` raw USDC amount was executed;
+   - `get_intent_status(intent_id)` and
+     `get_intent_status(canonical_rule_hash)` resolve to the same row;
+   - the funding intent reports `status: "completed"` and the WatchRule reports
+     `watch_rule_status: "completed"`;
+   - the watcher execution report says both durable completion writes applied
+     and associates them with that same execution signature and finalized
+     slot.
+
+If either deadline becomes too short before step 5, abandon that attempt and
+restart at step 1 with a fresh unused identity. If funding was already sent,
+retain its signature and stop: there is currently no automatic refund handler
+or complete, operational manual-refund procedure, so funds may remain in the
+controlled ATA pending explicit reconciliation. Do not repurpose the payment,
+edit the database, or imply that recovery is already available. If the process
+crashes or broadcast finality is ambiguous, leave the durable state in
+`executing` and reconcile the known signature on-chain before any retry.
 
 ### Development smoke-test data
 
