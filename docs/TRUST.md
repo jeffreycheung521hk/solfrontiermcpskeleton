@@ -37,6 +37,36 @@ append-only 證明：既有 enum declaration 不移位，兩個 schema-v1 fixtur
 遷移契約和鏈上授權邊界見
 [Phase 3 SolendDeposit schema amendment](phase3-solend-deposit-schema.md)。
 
+## Runtime cutover：PR #12
+
+[PR #12](https://github.com/jeffreycheung521hk/solfrontiermcpskeleton/pull/12)
+已讓 `finalize_intent` 正式寫入 schema-v2
+`ActionSpec::SolendDeposit`。舊 W5e withdraw carrier 佔位符已從
+finalize production path 移除；新的 action 把 target obligation、reserve、
+lending market、Solend program id、input mint 與 exact input amount 六欄
+全部放進 canonical fingerprint。
+
+finalize 同時 fail closed 地要求：
+
+```text
+action.input_amount_raw
+  == watch_rule.max_input_amount_raw
+  == funding.amount_raw
+```
+
+固定 finalize fixture 的新 canonical rule hash 是
+`25a8cee58db0e6a722afbeb76da9fbcf073e2de44a03101105b75ff3952ec52c`。
+它由 Actions runner 先從程式輸出，再在後續 commit 釘成 golden；不是人工
+計算或沿用 core 的 `094818…` fixture。
+
+資料庫沒有 migration 或舊 row 改寫。schema-v1 與 schema-v2 規則以各自的
+`schema_version` 自描述，canonical-hash 反查會重讀主 DB 並重算 hash。
+不同 `(threshold_bps, amount_raw)` tuple 的 v1/v2 rows 可同庫並存；如果
+兩版使用完全相同的 tuple 與 pinned controlled wallet，既有 deterministic
+`rule_id` 會相撞，finalize 回 `existing_rule_conflict`，保留舊 row/hash
+且不產生 funding/signing instructions。Phase 3 驗收不得靠遷移或覆寫舊
+0.1 USDC 標本規避此邊界。
+
 ## 可公開核驗的主網證據
 
 ### 1. 本 repository 的 Phase 2 funding 驗收
