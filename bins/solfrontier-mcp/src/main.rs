@@ -7,14 +7,16 @@
 //! random non-canonical draft id, and creates the legacy-compatible WatchRule
 //! plus funding-intent rows. A separate `confirm_funding` tool verifies an
 //! already user-signed transaction before advancing the two funding CAS
-//! transitions. Phase 3b adds a separate `watch` subcommand which can only
-//! assemble and print a deliberately unsubmitable unsigned transaction: it
-//! has no lease, keypair, signing, broadcast, confirmation, or
-//! state-transition capability.
+//! transitions. Phase 3b adds a separate `watch` subcommand. It defaults to a
+//! read-only dry-run; only an explicit `watch --execute` enables the
+//! controlled-wallet review, signing, single-shot submission, finalized
+//! confirmation, and durable transition path.
 //!
 //! System invariants INV-1..INV-8 (原 ARCHITECTURE.md) apply verbatim.
-//! In particular: this binary must NEVER hold main-wallet key material,
-//! and no tool may sign or submit a transaction.
+//! In particular: this binary must NEVER hold main-wallet key material. MCP
+//! tools never sign or submit; the separate `watch --execute` command may
+//! load and pin-check only the controlled-wallet keypair at explicit execute
+//! startup, before any candidate scan; no MCP server/tool path loads a key.
 //!
 //! API shape follows the official rmcp 1.7 counter/calculator examples
 //! (Parameters wrapper + CallToolResult).
@@ -30,6 +32,10 @@ mod quote;
 mod sidecar;
 mod status;
 mod watch;
+mod watch_execute;
+mod watch_execution_state;
+mod watch_submission;
+mod watch_wallet;
 
 use clap::{Parser, Subcommand};
 use claw_state_store::{
@@ -268,11 +274,15 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Continuously inspect executable intents without signing or DB writes.
+    /// Inspect executable intents; dry-run unless --execute is explicit.
     Watch {
         /// Scan exactly once and exit (for tests and human review).
         #[arg(long)]
         once: bool,
+        /// Enable CAS lease, controlled-wallet review/sign, one-shot
+        /// broadcast, finalized confirmation, and state transitions.
+        #[arg(long)]
+        execute: bool,
     },
 }
 
@@ -307,8 +317,8 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    if let Some(Command::Watch { once }) = &cli.command {
-        return crate::watch::run_watch(&cli.db, *once).await;
+    if let Some(Command::Watch { once, execute }) = &cli.command {
+        return crate::watch::run_watch(&cli.db, *once, *execute).await;
     }
 
     tracing::info!("solfrontier-mcp starting (stdio, Phase 2 funding slice)");

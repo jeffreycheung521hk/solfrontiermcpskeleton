@@ -19,6 +19,7 @@ use claw_types::{
         STAGE2_WATCH_RULE_SCHEMA_V1, STAGE2_WATCH_RULE_SCHEMA_V2,
     },
 };
+use serde::{Serialize, Serializer};
 use solana_sdk::program_option::COption;
 
 const SOLEND_PROGRAM: &str = "So1endDq2YkqhipRh3WViPa8hdiSpxWy6z3Z6tMCpAo";
@@ -47,6 +48,65 @@ const MAINNET_RESERVE_FIXTURE_BASE64: &str = include_str!(
     "../../../crates/protocols/src/solend/fixtures/main_pool_usdc_reserve_slot_435907990.b64"
 );
 
+struct AlwaysFailsToSerialize;
+
+impl Serialize for AlwaysFailsToSerialize {
+    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        Err(serde::ser::Error::custom(
+            "intentional serialization failure",
+        ))
+    }
+}
+
+#[test]
+fn watch_tests_report_serialization_failure_is_explicit() {
+    assert_eq!(
+        emit_json_report(
+            &AlwaysFailsToSerialize,
+            "fixture_report_serialization_failed"
+        ),
+        Err("fixture_report_serialization_failed")
+    );
+}
+
+#[tokio::test]
+async fn watch_tests_untrusted_system_time_blocks_eligibility_and_lease() {
+    assert_eq!(unix_time_ms_or_fail_closed(UNIX_EPOCH), 0);
+    let pre_epoch = UNIX_EPOCH
+        .checked_sub(Duration::from_millis(1))
+        .expect("platform supports a pre-epoch SystemTime fixture");
+    let failed_clock_ms = unix_time_ms_or_fail_closed(pre_epoch);
+    assert_eq!(failed_clock_ms, i64::MAX);
+
+    let store = FileStore::new("failed-system-clock").await;
+    let rule = deposit_rule(19);
+    insert_candidate(&store, &rule, AMOUNT_RAW, 2_000, 1).await;
+    let intent_id = hex::encode(rule.rule_id);
+    assert_eq!(
+        store
+            .funding
+            .lease_execution_if_budget_reserved(&intent_id, failed_clock_ms)
+            .await
+            .expect("failed clock lease must be a clean CAS miss"),
+        0,
+        "the persisted expiry CAS must reject a failed host-clock sample"
+    );
+
+    store.close_writer().await;
+    let reader = store.open_reader().await;
+    let report = scan_once(
+        &reader,
+        Some(&SlotOnlySource(FIXTURE_SLOT)),
+        &FixedClock(failed_clock_ms),
+    )
+    .await;
+    reader.close().await;
+    assert_eq!(row_for_rule(&report, &rule).status, "wall_clock_expired");
+}
+
 #[test]
 fn watch_tests_cli_once_is_explicit_and_database_path_remains_global() {
     let cli = crate::Cli::try_parse_from([
@@ -60,8 +120,47 @@ fn watch_tests_cli_once_is_explicit_and_database_path_remains_global() {
     assert_eq!(cli.db, PathBuf::from("offline-watch.db"));
     assert!(matches!(
         cli.command,
-        Some(crate::Command::Watch { once: true })
+        Some(crate::Command::Watch {
+            once: true,
+            execute: false,
+        })
     ));
+
+    let execute = crate::Cli::try_parse_from([
+        "solfrontier-mcp",
+        "watch",
+        "--execute",
+        "--once",
+        "--db",
+        "offline-watch.db",
+    ])
+    .expect("parse explicit execute command");
+    assert!(matches!(
+        execute.command,
+        Some(crate::Command::Watch {
+            once: true,
+            execute: true,
+        })
+    ));
+}
+
+#[tokio::test]
+async fn watch_tests_dry_run_report_declares_query_only_access_when_constructed() {
+    let store = FileStore::new("dry-run-report-mode").await;
+    store.close_writer().await;
+    let reader = store.open_reader().await;
+
+    let report = scan_cycle(
+        &reader,
+        Option::<&SlotOnlySource>::None,
+        &FixedClock(1_000),
+        ScanMode::DryRun,
+    )
+    .await;
+    reader.close().await;
+
+    assert_eq!(report.mode, "dry_run");
+    assert_eq!(report.database_access, "sqlite_read_only_query_only");
 }
 
 #[derive(Debug)]
@@ -453,6 +552,45 @@ async fn watch_tests_wall_and_slot_deadline_endpoints_are_inclusive_blockers() {
 }
 
 #[tokio::test]
+async fn watch_tests_final_slot_sample_is_authoritative_at_inclusive_endpoint() {
+    let store = FileStore::new("divergent-slot-samples").await;
+    let mut rule = deposit_rule(18);
+    rule.expires_at_slot = FIXTURE_SLOT + 1;
+    insert_candidate(&store, &rule, AMOUNT_RAW, 2_000, 1).await;
+
+    store.close_writer().await;
+    let reader = store.open_reader().await;
+    let chain = fixture_chain(false);
+    *chain.slots.lock().expect("fixture slot mutex") =
+        VecDeque::from([FIXTURE_SLOT, rule.expires_at_slot]);
+
+    let report = scan_once(&reader, Some(&chain), &FixedClock(1_000)).await;
+    reader.close().await;
+
+    assert_eq!(
+        report.current_confirmed_slot,
+        Some(FIXTURE_SLOT),
+        "the cycle report preserves the eligible preflight sample"
+    );
+    let row = row_for_rule(&report, &rule);
+    assert_eq!(
+        row.status, "slot_expired",
+        "the later final sample at the inclusive endpoint must block readiness"
+    );
+    let candidate = row.candidate.as_ref().expect("slot-expired candidate");
+    assert_eq!(
+        candidate.clocks.current_confirmed_slot,
+        Some(rule.expires_at_slot),
+        "the candidate's final gate must report the later authoritative sample"
+    );
+    assert_eq!(candidate.clocks.slot_clock_eligible, Some(false));
+    assert!(candidate
+        .findings
+        .iter()
+        .any(|finding| finding.code == FindingCode::SlotExpired));
+}
+
+#[tokio::test]
 async fn watch_tests_canonical_hash_mismatch_blocks_before_chain_reads() {
     let store = FileStore::new("hash-mismatch").await;
     let mut rule = deposit_rule(3);
@@ -478,6 +616,65 @@ async fn watch_tests_canonical_hash_mismatch_blocks_before_chain_reads() {
         .findings
         .iter()
         .any(|finding| finding.code == FindingCode::CanonicalHashMismatch));
+}
+
+#[tokio::test]
+async fn watch_tests_funding_identity_mismatch_blocks_before_rule_lookup() {
+    let store = FileStore::new("funding-identity-mismatch").await;
+    let intent_id = "11111111111111111111111111111111";
+    let different_rule_id = "22222222222222222222222222222222";
+    store
+        .funding
+        .insert(&NewW5hFundingIntent {
+            intent_id: intent_id.to_owned(),
+            rule_id_hex: different_rule_id.to_owned(),
+            canonical_rule_hash_hex: "00".repeat(32),
+            user_wallet: CONTROLLED_WALLET.to_owned(),
+            user_usdc_ata: CONTROLLED_USDC_ATA.to_owned(),
+            controlled_wallet: CONTROLLED_WALLET.to_owned(),
+            controlled_usdc_ata: CONTROLLED_USDC_ATA.to_owned(),
+            amount_raw: AMOUNT_RAW,
+            threshold_bps: 50,
+            save_display_apy_bps_at_creation: 500,
+            native_onchain_apr_bps_at_creation: 450,
+            created_at_ms: 1,
+            expires_at_ms: 2_000,
+        })
+        .await
+        .expect("insert mismatched funding fixture");
+    assert_eq!(
+        store
+            .funding
+            .mark_funding_submitted_if_required(intent_id, "identity-fixture")
+            .await
+            .expect("submit mismatched funding fixture"),
+        1
+    );
+    assert_eq!(
+        store
+            .funding
+            .mark_budget_reserved_if_submitted(intent_id, "identity-fixture", FIXTURE_SLOT)
+            .await
+            .expect("reserve mismatched funding fixture"),
+        1
+    );
+
+    store.close_writer().await;
+    let reader = store.open_reader().await;
+    let report = scan_once(&reader, Some(&SlotOnlySource(150)), &FixedClock(1_000)).await;
+    reader.close().await;
+
+    let row = report
+        .rows
+        .iter()
+        .find(|row| row.intent_id.as_deref() == Some(intent_id))
+        .expect("mismatched funding report row");
+    assert_eq!(row.status, "identity_mismatch");
+    assert_eq!(
+        row.error_class.as_deref(),
+        Some("funding_intent_rule_id_mismatch")
+    );
+    assert!(row.candidate.is_none());
 }
 
 #[tokio::test]
@@ -833,6 +1030,46 @@ async fn watch_tests_ready_report_is_unsigned_and_matches_mainnet_instruction_pr
         .signatures
         .iter()
         .all(|signature| *signature == Default::default()));
+}
+
+#[tokio::test]
+async fn watch_tests_execute_preflight_retains_plan_without_prelease_transaction_assembly() {
+    let store = FileStore::new("execute-preflight-plan-only").await;
+    let rule = deposit_rule(17);
+    insert_candidate(&store, &rule, AMOUNT_RAW, 2_000, 1).await;
+
+    store.close_writer().await;
+    let reader = store.open_reader().await;
+    let chain = fixture_chain(false);
+    let report = scan_cycle(
+        &reader,
+        Some(&chain),
+        &FixedClock(1_000),
+        ScanMode::ExecutePreflight,
+    )
+    .await;
+
+    assert_eq!(report.mode, "execute_preflight");
+    assert_eq!(
+        report.database_access,
+        "sqlite_read_only_preflight_with_execute_writer"
+    );
+    let row = row_for_rule(&report, &rule);
+    assert_eq!(row.status, "ready");
+    assert!(
+        row.unsigned_transaction.is_none(),
+        "execute preflight must not build a transaction before CAS"
+    );
+    let intent_id = hex::encode(rule.rule_id);
+    let final_inspection =
+        revalidate_one(&reader, Some(&chain), &FixedClock(1_000), &intent_id).await;
+    assert_eq!(final_inspection.row.status, "ready");
+    assert!(final_inspection.row.unsigned_transaction.is_none());
+    assert!(
+        final_inspection.plan.is_some(),
+        "target revalidation must retain the complete validated plan until CAS"
+    );
+    reader.close().await;
 }
 
 #[tokio::test]
