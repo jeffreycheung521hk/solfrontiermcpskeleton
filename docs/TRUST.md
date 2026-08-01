@@ -1,5 +1,14 @@
 # SolFrontier trust overview
 
+> English translation: [TRUST.en.md](TRUST.en.md)
+>
+> **狀態註記(2026-08-01):**本文件寫於 PR #17 合併之前。下文「tree 仍
+> 沒有 execution lease、signer、broadcast」等描述對應 Phase 3b-1 當時
+> 狀態,為存真保留。PR #17 其後加入 operator 啟動的非 MCP
+> `watch --execute` rail,並於 2026-08-01 完成首次主網執行驗收;現行
+> 狀態(含保留的失敗紀錄與明確未關閉的債務)見
+> [Phase 3b-2 主網驗收紀錄](phase3b-2-mainnet-acceptance.md)。
+
 這份文件給外部覆核者一條約十分鐘可走完的證據路徑。它只整理目前
 repository 已能公開重算的事實，不把 Phase 3b-1 的唯讀 dry-run、
 測試 fixture 或一次成功觀測描述成已交付可簽名 executor 的安全保證。
@@ -197,4 +206,5 @@ cursor，而且以整批 all-or-nothing 方式做 row decode。一筆損毀資�
 - [SolendDeposit canonical schema、主網 account 對帳與遷移契約](phase3-solend-deposit-schema.md)
 - [Phase 2 主網驗收紀錄](phase2-mainnet-acceptance.md)
 - [Phase 3b-1 真資料唯讀 dry-run 與離線交易對帳](phase3b-dry-run-acceptance.md)
+- [Phase 3b-2 主網執行驗收紀錄](phase3b-2-mainnet-acceptance.md)（[English](phase3b-2-mainnet-acceptance.en.md)）
 - [GitHub Actions gate definition](../.github/workflows/gate.yml)

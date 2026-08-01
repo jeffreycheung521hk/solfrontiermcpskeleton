@@ -1,5 +1,7 @@
 # Phase 3b-2 主網執行驗收紀錄
 
+> English translation: [phase3b-2-mainnet-acceptance.en.md](phase3b-2-mainnet-acceptance.en.md)
+
 ## 結論
 
 **PASS（限定範圍）。** 2026-08-01，SolFrontier MCP 在 Solana mainnet 首次完成
@@ -87,7 +89,7 @@ Deposit 走的是 Solend `Deposit Reserve Liquidity and Obligation Collateral`�
 | 18:57:37.3 | risk-engine `verdict=approved` → 簽名 → broadcast |
 | 18:57:37 | Deposit 交易上鏈，slot `436548513` |
 | 18:57:52.5 | 觀測到 `finalized` 後寫入 `completed`，迴圈 `STOP completed` 自行結束 |
-| （18:58:56.714） | funding row 名義期限；本次在此之前 79 秒完成 |
+| （18:58:56.714） | funding row 名義期限；本次 deposit 交易在此之前 79 秒上鏈 |
 
 全程 73 次 attempt，其中 12 次 `reserve_stale`。`abort_remaining_cycle` 為
 `false`，沒有任何 `*_scan_failed` / `*_scan_truncated`。
