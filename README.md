@@ -3,6 +3,30 @@
 MCP rebuild of SolFrontier — a policy-gated, fail-closed Solana bounded-intent
 control plane, exposed as an MCP stdio server.
 
+## What this artifact proves — and deliberately does not
+
+**Proves, verifiably on Solana mainnet:** an AI-proposed, human-funded,
+policy-gated execution loop ran end-to-end with real money — typed proposal →
+human Phantom signature → on-chain funding verification → CAS lease →
+simulation → risk-engine policy → controlled-wallet signing → finalized-only
+confirmation. Two acceptances — the funding leg alone, then the full loop —
+each with a public transaction:
+[Phase 2 funding, 0.1 USDC (2026-07-29)](https://explorer.solana.com/tx/67PPnfsYT6qFvEwiyyTojkqNE2E6UwiYq1qCRHW6g9hpvyVMNEWymjxSSz8Zwrn9eqDzMxvEfVTqUY3xe4NJcJHV)
+and [Phase 3b-2 autonomous deposit, 0.2 USDC (2026-08-01)](https://explorer.solana.com/tx/hpVwPcMwy6RWATk2ks7HPEo8bS4zGAPaL7gx4BcdpBqgs4d27NrD6YF73T8nk9gokiatT7iGx2YdrNupzcdx6J4).
+The [acceptance record](docs/phase3b-2-mainnet-acceptance.en.md) also preserves
+a same-day **failed** run that the gates correctly refused — including the
+0.2 USDC it left stranded, documented rather than hidden.
+
+**Deliberately does not prove:** production readiness (a
+[named debt register](CLAUDE.md) stays open: no refunds, no crash recovery, no
+pagination, unproven key zeroization); on-chain delegated authorization (the
+executed rail signs directly with a pinned wallet — no Authorization PDA);
+more than one action (a single Solend USDC deposit, 0.10–1.00 USDC); or
+unaided coding (built AI-assisted under a human-authored control framework —
+the invariants, evidence grading, and risk acceptances in
+[TRUST.en.md](docs/TRUST.en.md) are the point). Project status:
+[STATUS.md](STATUS.md).
+
 - Start here: [`CLAUDE.md`](CLAUDE.md) (working rules) and
   [`docs/重構建議書.md`](docs/重構建議書.md) (full architecture rationale & roadmap).
 - Predecessors: [Solfrontier2026](https://github.com/jeffreycheung521hk/Solfrontier2026)
