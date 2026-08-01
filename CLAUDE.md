@@ -31,13 +31,13 @@ SolFrontier(前身 ClawSolana / Solfrontier2026)的 MCP 重構版:一個 policy-
 | `bins/solfrontier-mcp` | MCP 入口 | rmcp stdio server;負責 tools、transport、runtime/config 與後端協調 glue,純 protocol logic 下沉 `crates/protocols` |
 | `web/signing-page` | Phase 2 靜態頁 | 單一 HTML 入口 + 本地 vendored JS 的 build-free Phantom 入金目錄;零後端接觸、簽名時不下載外部託管程式碼,由使用者自行以只綁 `127.0.0.1` 且只公開該目錄的靜態伺服器啟動;MCP binary 不開 HTTP port、不自動開瀏覽器 |
 | `crates/protocols/` | Phase 3 進行中 | 純 Jupiter/Solend wire types、decoders 與 unsigned builders;不得依賴 approval/pending state、DB、network、signing 或 submission |
-| `crates/executor` | Phase 3b-1 已交付;Phase 3b-2 execution 由 PR #17 引入、真鏈驗收另記 | SDK/DB/RPC 無關的 fail-closed candidate/condition 驗證核心;write-capable lease、simulation、controlled-wallet signing、broadcast 與 finality adapter 只允許留在明確的 bin/runtime 邊界 |
+| `crates/executor` | Phase 3b-1 已交付;Phase 3b-2 execution 由 PR #17 引入,主網驗收見 `docs/phase3b-2-mainnet-acceptance.md` | SDK/DB/RPC 無關的 fail-closed candidate/condition 驗證核心;write-capable lease、simulation、controlled-wallet signing、broadcast 與 finality adapter 只允許留在明確的 bin/runtime 邊界 |
 
 **禁止**重新引入:自製 LLM client / ReAct loop(舊 agent-runtime)、HTTP API surface(舊 api crate)、chat UI。這些由 MCP host 提供。
 
 `web/signing-page` 是使用者自行啟動的 loopback-only 靜態檔案,不是 MCP HTTP API;不得把其伺服器、路由或自動開瀏覽器邏輯塞進 MCP binary。
 
-## 目前階段:Phase 2 與 Phase 3b-1 已完成;Phase 3b-2 execution 由 PR #17 引入、主網驗收待獨立記錄
+## 目前階段:Phase 2 與 Phase 3b-1 已完成;Phase 3b-2 execution 由 PR #17 引入,主網驗收已於 2026-08-01 完成並記錄
 
 Phase 2 已於 2026-07-29 以 0.1 USDC 完成 Solana mainnet 全流程驗收，
 並在 PR #4 合併後於 `main` 重跑完整 gate。公開交易、驗證項目與
@@ -60,7 +60,26 @@ stderr 完整交易揭露、wallet-engine simulation、risk-engine policy、
 write-capable repository connection,不得只標成 read-only。
 孤兒逐列分類後跳過,不會令完整循環崩潰;多筆 ready 可依序處理。
 這是 mainnet 測試資金切片,不是 production-ready、restart-safe 或完整
-reconciliation 的宣告;PR 合併與獨立 mainnet 驗收前亦不得寫成已交付。
+reconciliation 的宣告。PR #17 已於 2026-07-31 合併,主網驗收於 2026-08-01
+完成;兩者皆成立不代表可外推——本 rail 仍只准用測試資金。
+
+2026-08-01 已以 0.2 USDC 完成首次 Phase 3b-2 主網執行驗收:intent
+`5a000000400d0300000000009a62dace`,deposit 交易
+`hpVwPcMwy6RWATk2ks7HPEo8bS4zGAPaL7gx4BcdpBqgs4d27NrD6YF73T8nk9gokiatT7iGx2YdrNupzcdx6J4`
+於 slot `436548513` 達 `finalized`,funding 與 WatchRule 均為 `completed`。
+完整證據、gate 鏈逐項驗證、同日一次正確 fail-closed 的失敗紀錄、Solend
+reserve 刷新頻率實測,以及該次失敗遺留、尚未清償的 0.2 USDC,見
+`docs/phase3b-2-mainnet-acceptance.md`。該驗收只涵蓋單筆固定 Solend USDC
+deposit、釘死 controlled wallet 與測試資金;它沒有關閉任何一項既有技術債,
+也不得外推成 production-ready、restart-safe 或已部署的 PDA 授權執行。
+
+執行次序是驗收的硬性前提:`watch --execute` 必須在 `finalize_intent`
+之前啟動。空白 DB 上尚未 `budget_reserved` 的 pending rule 不產生 row,
+掃描回 `"rows": []` 屬安全重試,迴圈可無限期 idle;反之若把 executor 排在
+人手步驟之後,180 秒 funding 窗口會被耗盡並令資金停在無法執行的
+`budget_reserved`。新建 acceptance DB 必須先以 MCP server 開啟一次令
+migrations 生效,確認 dry-run 回 `"rows": []` 且 `"scan_errors": []` 後才可
+啟動 execute 迴圈。
 
 Phase 1 已完成:`get_quote`、`get_position`、`get_intent_status` 三個唯讀 tools 已分別接上 Jupiter、Solana RPC/Solend 與 state-store 真實後端,並通過 stdio MCP 驗證。
 
