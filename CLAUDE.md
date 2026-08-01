@@ -60,7 +60,8 @@ stderr 完整交易揭露、wallet-engine simulation、risk-engine policy、
 write-capable repository connection,不得只標成 read-only。
 孤兒逐列分類後跳過,不會令完整循環崩潰;多筆 ready 可依序處理。
 這是 mainnet 測試資金切片,不是 production-ready、restart-safe 或完整
-reconciliation 的宣告;PR 合併前不得寫成已交付。
+reconciliation 的宣告。PR #17 已於 2026-07-31 合併,主網驗收於 2026-08-01
+完成;兩者皆成立不代表可外推——本 rail 仍只准用測試資金。
 
 2026-08-01 已以 0.2 USDC 完成首次 Phase 3b-2 主網執行驗收:intent
 `5a000000400d0300000000009a62dace`,deposit 交易
