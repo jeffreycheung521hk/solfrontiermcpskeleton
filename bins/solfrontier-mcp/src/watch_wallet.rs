@@ -135,6 +135,15 @@ impl LoadedControlledWallet {
     pub(crate) fn pubkey(&self) -> Pubkey {
         self.pubkey
     }
+
+    /// Handle to the keystore-held signer, for the refund rail's own pipeline.
+    ///
+    /// Purely additive: the execute rail's behaviour is unchanged. The signer
+    /// is still never exposed outside the crate, and the value is a handle into
+    /// the frozen keystore rather than key material.
+    pub(crate) fn signer_ref(&self) -> SignerRef {
+        self.signer.clone()
+    }
 }
 
 /// Load the controlled wallet using the configured environment variable.
