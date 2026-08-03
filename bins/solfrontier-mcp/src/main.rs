@@ -29,6 +29,7 @@ mod funding;
 mod position;
 mod propose;
 mod quote;
+mod refund;
 mod refund_builder;
 mod refund_journal;
 mod refund_wallet;
@@ -287,6 +288,21 @@ enum Command {
         #[arg(long)]
         execute: bool,
     },
+    /// Return a stranded funding amount to the wallet that paid it.
+    ///
+    /// Dry-run unless --execute is explicit. The operator may name an intent
+    /// and nothing else: the amount, the source and the destination are all
+    /// re-derived from the funding row, so no flag here can send a different
+    /// amount or send it anywhere else.
+    Refund {
+        /// The funding intent to refund.
+        #[arg(long, value_name = "INTENT_ID")]
+        intent: String,
+        /// Enable refund lease, controlled-wallet review/sign, pre-broadcast
+        /// journalling, one-shot broadcast and finalized confirmation.
+        #[arg(long)]
+        execute: bool,
+    },
 }
 
 const INSTRUCTIONS: &str = "SolFrontier is a fail-closed, policy-gated control plane for bounded \
@@ -320,8 +336,19 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    if let Some(Command::Watch { once, execute }) = &cli.command {
-        return crate::watch::run_watch(&cli.db, *once, *execute).await;
+    match &cli.command {
+        Some(Command::Watch { once, execute }) => {
+            return crate::watch::run_watch(&cli.db, *once, *execute).await;
+        }
+        Some(Command::Refund { intent, execute }) => {
+            if !execute {
+                tracing::warn!(
+                    "DRY RUN ONLY: refund cannot lease, load keys, sign, broadcast, or change database state"
+                );
+            }
+            return crate::refund::run_refund(&cli.db, intent, *execute).await;
+        }
+        None => {}
     }
 
     tracing::info!("solfrontier-mcp starting (stdio, Phase 2 funding slice)");
