@@ -17,15 +17,78 @@ The [acceptance record](docs/phase3b-2-mainnet-acceptance.en.md) also preserves
 a same-day **failed** run that the gates correctly refused — including the
 0.2 USDC it left stranded, documented rather than hidden.
 
+**Phase 4 (2026-08-03) added the other direction: money comes back.** A
+refund rail — lease, pre-broadcast journal, blockhash-expiry recovery, both
+balance deltas verified exact at `finalized` before the ledger is marked —
+recovered every stranded amount, including the one above, across four mainnet
+refunds. The same day, three more complete funding→deposit runs landed, the
+last with **no human step after a single Phantom approval**. Net loss across
+five failed attempts and three successes: zero. Evidence, every claim
+re-derivable from the public ledger by `sfcli audit`:
+[refund acceptance](docs/phase4-refund-acceptance.md) (12 claims) and
+[execution acceptance](docs/phase4-execution-acceptance.md) (40 claims).
+
 **Deliberately does not prove:** production readiness (a
-[named debt register](CLAUDE.md) stays open: no refunds, no crash recovery, no
-pagination, unproven key zeroization); on-chain delegated authorization (the
-executed rail signs directly with a pinned wallet — no Authorization PDA);
-more than one action (a single Solend USDC deposit, 0.10–1.00 USDC); or
-unaided coding (built AI-assisted under a human-authored control framework —
-the invariants, evidence grading, and risk acceptances in
-[TRUST.en.md](docs/TRUST.en.md) are the point). Project status:
+[named debt register](CLAUDE.md) stays open: the refund rail is single-intent
+with no pagination or auditable sweep, refund recovery has never exercised a
+resend, no crash recovery for `executing`, unproven key zeroization); on-chain
+delegated authorization (the executed rail signs directly with a pinned
+wallet — no Authorization PDA); more than one action (a single Solend USDC
+deposit, 0.10–1.00 USDC); or unaided coding (built AI-assisted under a
+human-authored control framework — the invariants, evidence grading, and risk
+acceptances in [TRUST.en.md](docs/TRUST.en.md) are the point). Project status:
 [STATUS.md](STATUS.md).
+
+## Anatomy of one successful run
+
+What the fully-automatic 2026-08-03 run actually was — worth stating
+precisely, because each clarification is a design decision:
+
+```
+you:      one command + one Phantom approval
+          (0.2 USDC funding, bound to this one intent)
+            |
+flow:     detects YOUR payment on chain -> exact proof (memo, payer,
+          amount, both balance deltas by accountIndex) -> confirm
+          -> budget_reserved
+            |
+executor: every cycle: read the reserve from chain -> recompute supply
+          APR -> 187 bps > 98 bps? yes
+          reserve FRESH? (stale bit clear AND age <= 16 slots)
+             ^-- this, not the rate, is what it was actually waiting for
+            |
+          eight gates: CAS lease -> fresh rebuild -> simulation
+          -> risk policy -> Approved typestate -> signing
+          -> byte-identity check -> broadcast, finalized only
+            |
+          Solend deposit lands (34 seconds after confirm)
+```
+
+Three clarifications that matter:
+
+1. **The rate condition was true the whole time.** The executor was not
+   waiting for the rate to cross the threshold; it was waiting for reserve
+   **freshness**. Solend's reserve data is fresh for roughly 6 seconds in
+   every 60, and the condition only counts when recomputed from fresh
+   on-chain data — stale data fails closed. That freshness window, not the
+   180-second funding window, is the binding constraint of the whole rail.
+
+2. **The system never takes money.** The deposit spends exactly the 0.2 USDC
+   the human signed, whose amount, intent and condition were pinned *before*
+   the signature. Facing any rate, however good, the executor cannot move one
+   token more than what was funded — INV-1: humans sign, AI proposes.
+
+3. **"Condition met → deposit" compresses eight gates.** A true condition is
+   the entry ticket, not the decision: CAS lease against double execution, a
+   fresh rebuild, a passing simulation, a real risk policy, the `Approved`
+   typestate, byte-identical signed bytes, and a confirmation that accepts
+   only `finalized`. Any gate failing stops the run — no retry, no bypass.
+
+In one sentence: **you define in advance what condition, what action, and at
+most how much money; you sign once to fund that envelope; the automation works
+inside it on live on-chain evidence — and every step leaves a trail that can
+be re-derived afterwards from the public ledger.** The 40 chain-verified
+claims in the execution acceptance are the last clause made literal.
 
 - Start here: [`CLAUDE.md`](CLAUDE.md) (working rules) and
   [`docs/重構建議書.md`](docs/重構建議書.md) (full architecture rationale & roadmap).
