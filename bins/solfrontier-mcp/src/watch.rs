@@ -409,7 +409,19 @@ async fn run_execute_watch(
          every candidate intent_id and amount_raw will be printed before lease acquisition !!!"
     );
 
+    let heartbeat = crate::watch_heartbeat::ExecutorHeartbeat::for_database_path(db_path);
+
     loop {
+        // Written at the top of every cycle, before any candidate work. The
+        // 2026-08-01 acceptance failed because the executor was started 107
+        // seconds after the funding deadline: the money was already committed
+        // by a human before anything could confirm the process was even alive.
+        // A client can now require proof of a live executor before it hands a
+        // signing URL to a person. A failed write is not fatal here -- it must
+        // not stop an executor that is otherwise working -- but its absence
+        // correctly makes the client refuse.
+        heartbeat.beat(pinned_wallet).await;
+
         let report = scan_cycle(store, source, &SystemWatchClock, ScanMode::ExecutePreflight).await;
         if emit_json_report(
             &report,

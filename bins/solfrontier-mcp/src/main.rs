@@ -38,6 +38,7 @@ mod status;
 mod watch;
 mod watch_execute;
 mod watch_execution_state;
+mod watch_heartbeat;
 mod watch_submission;
 mod watch_wallet;
 
