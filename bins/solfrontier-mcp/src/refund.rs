@@ -32,7 +32,7 @@ use serde_json::{json, Value};
 use solana_sdk::pubkey::Pubkey;
 
 use crate::{
-    funding::{ConfirmationLevel, ObservedFundingTransaction},
+    funding::{ConfirmationLevel, FundingTransactionReader, ObservedFundingTransaction},
     refund_builder::{build_unsigned_refund, placeholder_message_bytes, RefundPlan},
     refund_journal::{
         recovery_action, ChainPresence, JournalLookup, RecordedAttempt, RecoveryAction,
@@ -280,6 +280,35 @@ pub(crate) async fn run_refund(
     // Recovery BEFORE anything else. A previous attempt may already be on
     // chain, and finding that out afterwards is finding out too late.
     let lookup = journal.lookup(intent_id).await;
+
+    // A missing journal is ambiguous on its own: it could mean nothing was ever
+    // signed, or it could mean the record of something that WAS signed has been
+    // deleted. The main database resolves it, which is the whole reason it stays
+    // the source of truth.
+    //
+    // The lease moves the row to `refunding` BEFORE anything is signed, so a row
+    // still sitting at `budget_reserved` or `expired` proves no signature can
+    // exist. Journal absence is then benign, and this is also the ordinary state
+    // of the very first refund on a database.
+    //
+    // Once the row says `refunding`, absence means the opposite, and the halt
+    // below stands.
+    let never_leased = matches!(
+        row.status,
+        W5hIntentStatus::BudgetReserved | W5hIntentStatus::Expired
+    );
+    let lookup = match (&lookup, never_leased) {
+        (JournalLookup::Unavailable { error_class }, true) => {
+            emit(&json!({
+                "journal": "absent, and the row was never leased for refund",
+                "detail": error_class,
+                "reasoning": "the lease precedes signing, so budget_reserved/expired proves no signature exists",
+            }));
+            JournalLookup::Absent
+        }
+        _ => lookup,
+    };
+
     let action = recovery_action(&lookup, ChainPresence::Unknown, None);
     if let JournalLookup::Found(attempt) = &lookup {
         emit(&json!({
@@ -389,9 +418,55 @@ pub(crate) async fn run_refund(
     match outcome {
         NetworkOutcome::Finalized { signature, slot } => {
             emit(&json!({ "broadcast": "finalized", "signature": signature, "slot": slot }));
+
+            // Finalized is necessary and not sufficient. The row is only marked
+            // refunded once the chain itself shows both balances moving by
+            // exactly the amount: a transaction can finalize successfully and
+            // still not be the transfer we intended.
+            let reader = crate::funding::configured_funding_reader_from_env()
+                .ok_or_else(|| anyhow::anyhow!("refund_verify_reader_unavailable"))?;
+            let observed = match reader.read_funding_transaction(&signature).await {
+                Ok(crate::funding::FundingTransactionRead::Confirmed(observed)) => observed,
+                Ok(crate::funding::FundingTransactionRead::Pending) => {
+                    // Broadcast said finalized; the read says pending. Leave the
+                    // row in `refunding` rather than guessing which is right.
+                    anyhow::bail!("refund_verify_pending:{signature}")
+                }
+                Err(error) => anyhow::bail!("refund_verify_read_failed:{error}:{signature}"),
+            };
+            let proof = verify_refund_landed(&observed, &plan)
+                .map_err(|error| anyhow::anyhow!("{}:{signature}", error.class()))?;
             emit(&json!({
-                "next": "verify both deltas on chain, then mark_refunded_if_refunding",
-                "note": "the row stays in refunding until the deltas are proven exact",
+                "verified": "both deltas exact at finalized commitment",
+                "slot": proof.slot,
+                "controlled_delta": proof.source_delta.to_string(),
+                "user_delta": proof.destination_delta.to_string(),
+            }));
+
+            // Only now. This is the single write that ends the lifecycle, and
+            // it is CAS-bound to `refunding`, so a competing writer cannot be
+            // overwritten.
+            let marked = intents
+                .mark_refunded_if_refunding(intent_id, &signature)
+                .await?;
+            if marked != 1 {
+                // The chain moved and the ledger did not. Say so loudly rather
+                // than exiting zero: this is the cross-repository non-
+                // transactional boundary that DEBT-P3-EXECUTION-1 records, and
+                // the refund itself is complete and correct on chain.
+                emit(&json!({
+                    "result": "refund_landed_but_row_not_marked",
+                    "signature": signature,
+                    "action_required": "the refund is final on chain; reconcile the row by hand",
+                }));
+                anyhow::bail!("refund_marked_rows:{marked}:{signature}");
+            }
+            emit(&json!({
+                "result": "refunded",
+                "intent_id": intent_id,
+                "signature": signature,
+                "amount_raw": plan.amount_raw.to_string(),
+                "status": W5hIntentStatus::Refunded.as_str(),
             }));
             Ok(())
         }
